@@ -1,20 +1,42 @@
-"""Command-line cleanup entry point.
+"""Command-line entry point.
 
-Usage:
+Clean (default):
     <real python> -m dxfclean.cli <in.dxf> [out.dxf]
+    If out.dxf is omitted, writes <name>_clean.dxf next to the input.
 
-If out.dxf is omitted, writes <name>_clean.dxf next to the input. Prints the
-same report the GUI shows.
+Coordinate points table:
+    <real python> -m dxfclean.cli points <in.dxf> [out.csv]
+    Prints the numbered X|Y table of every intersection & vertex. If out.csv
+    is given, also writes the table as CSV.
 """
 import sys
 
+import ezdxf
+
 from .core import clean_file
+from .points import collect_points, points_as_table, write_csv
 
 
-def main(argv):
-    if len(argv) < 2:
+def _run_points(argv):
+    if len(argv) < 3:
         print(__doc__)
         return 2
+    src = argv[2]
+    try:
+        doc = ezdxf.readfile(src)
+    except IOError:
+        print("ERROR: not found:", src)
+        return 1
+    points, report = collect_points(doc)
+    print(points_as_table(points))
+    print("\n%d points." % len(points))
+    if len(argv) > 3:
+        out = write_csv(points, argv[3])
+        print("WROTE", out)
+    return 0
+
+
+def _run_clean(argv):
     src = argv[1]
     out = argv[2] if len(argv) > 2 else None
     try:
@@ -25,6 +47,15 @@ def main(argv):
     print(report.as_text())
     print("WROTE", out)
     return 0
+
+
+def main(argv):
+    if len(argv) < 2:
+        print(__doc__)
+        return 2
+    if argv[1] == "points":
+        return _run_points(argv)
+    return _run_clean(argv)
 
 
 if __name__ == "__main__":

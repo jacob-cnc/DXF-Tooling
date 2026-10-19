@@ -70,6 +70,25 @@ dropped, splines converted, and any warnings.
 
 Omit the output path to write `<name>_clean.dxf` next to the input.
 
+### Coordinate points table
+
+List every **de-duplicated** intersection & vertex of the cleaned drawing as a
+numbered `X | Y` table (1, 2, 3, …). Points cover all three classes — line
+endpoints/vertices, line↔arc/circle intersections, and arc endpoints + circle
+centre/quadrants — collapsed so a corner shared by several entities is **one**
+numbered row. Numbering is stable (ascending Y, then X), so the same drawing
+always yields the same numbers.
+
+In the **GUI**, the table appears on the right after you click *Clean + Save*,
+with a **Save points CSV…** button. Headless:
+
+```powershell
+& "C:\Users\jhonick\AppData\Local\Python\pythoncore-3.15-64\python.exe" -m dxfclean.cli points "in.dxf" "points.csv"
+```
+
+Prints the table; the optional second argument also writes it as CSV
+(`index,x,y,kind`).
+
 ## Acceptance test
 
 The regression fixture `fixtures/delrin_peg_ARCS_unsplit.dxf` (6 lines + 2 arcs
