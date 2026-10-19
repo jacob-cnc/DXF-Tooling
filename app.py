@@ -36,7 +36,8 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("DXF Cleanup -- ProtoTRAK DPM RMX")
-        self.root.geometry("1000x680")
+        self.root.geometry("1320x720")
+        self.root.minsize(1100, 560)
 
         self.src_path = None
         self.out_path = None
@@ -67,6 +68,35 @@ class App:
         mid = ttk.Frame(self.root, padding=8)
         mid.pack(fill="both", expand=True)
 
+        # Points table (right rail) -- packed FIRST so it always reserves its
+        # width and can never be pushed off-screen by the previews.
+        pts_frame = ttk.LabelFrame(mid, text="Coordinate points")
+        pts_frame.pack(side="right", fill="y", padx=(8, 0))
+        pts_frame.pack_propagate(False)
+        pts_frame.configure(width=280)
+
+        cols = ("idx", "x", "y")
+        self.pts_tree = ttk.Treeview(pts_frame, columns=cols, show="headings",
+                                     selectmode="browse")
+        self.pts_tree.heading("idx", text="#")
+        self.pts_tree.heading("x", text="X")
+        self.pts_tree.heading("y", text="Y")
+        self.pts_tree.column("idx", width=48, anchor="e")
+        self.pts_tree.column("x", width=100, anchor="e")
+        self.pts_tree.column("y", width=100, anchor="e")
+        pts_scroll = ttk.Scrollbar(pts_frame, orient="vertical",
+                                   command=self.pts_tree.yview)
+        self.pts_tree.configure(yscrollcommand=pts_scroll.set)
+        self.pts_count = tk.StringVar(value="No points yet - clean a file.")
+        ttk.Label(pts_frame, textvariable=self.pts_count).pack(
+            side="top", anchor="w", padx=4, pady=(2, 2))
+        self.save_csv_btn = ttk.Button(pts_frame, text="Save points CSV...",
+                                       command=self.save_points_csv,
+                                       state="disabled")
+        self.save_csv_btn.pack(side="bottom", fill="x", pady=(4, 0))
+        pts_scroll.pack(side="right", fill="y")
+        self.pts_tree.pack(side="left", fill="both", expand=True)
+
         before_frame = ttk.LabelFrame(mid, text="Before")
         before_frame.pack(side="left", fill="both", expand=True, padx=(0, 4))
         self.before_canvas = tk.Label(before_frame, background="white")
@@ -76,30 +106,6 @@ class App:
         after_frame.pack(side="left", fill="both", expand=True, padx=(4, 0))
         self.after_canvas = tk.Label(after_frame, background="white")
         self.after_canvas.pack(fill="both", expand=True)
-
-        # Points table (right rail)
-        pts_frame = ttk.LabelFrame(mid, text="Coordinate points")
-        pts_frame.pack(side="left", fill="y", padx=(8, 0))
-
-        cols = ("idx", "x", "y")
-        self.pts_tree = ttk.Treeview(pts_frame, columns=cols, show="headings",
-                                     height=20, selectmode="browse")
-        self.pts_tree.heading("idx", text="#")
-        self.pts_tree.heading("x", text="X")
-        self.pts_tree.heading("y", text="Y")
-        self.pts_tree.column("idx", width=44, anchor="e")
-        self.pts_tree.column("x", width=92, anchor="e")
-        self.pts_tree.column("y", width=92, anchor="e")
-        pts_scroll = ttk.Scrollbar(pts_frame, orient="vertical",
-                                   command=self.pts_tree.yview)
-        self.pts_tree.configure(yscrollcommand=pts_scroll.set)
-        self.pts_tree.pack(side="top", fill="y", expand=True)
-        pts_scroll.pack(side="right", fill="y")
-
-        self.save_csv_btn = ttk.Button(pts_frame, text="Save points CSV...",
-                                       command=self.save_points_csv,
-                                       state="disabled")
-        self.save_csv_btn.pack(side="bottom", fill="x", pady=(4, 0))
 
         # Report
         bottom = ttk.LabelFrame(self.root, text="Report", padding=4)
@@ -180,6 +186,7 @@ class App:
         for p in points:
             self.pts_tree.insert("", "end", iid=str(p.index),
                                  values=(p.index, "%.4f" % p.x, "%.4f" % p.y))
+        self.pts_count.set("%d points" % len(points))
         self.save_csv_btn.configure(
             state=("normal" if points else "disabled"))
 

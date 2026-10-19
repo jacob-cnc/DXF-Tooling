@@ -87,13 +87,15 @@ def _circle_points(circles):
     return out
 
 
-def collect_points_from_report(report, arcs, circles) -> List[Point]:
+def collect_points_from_report(report, arcs, circles, extra=None) -> List[Point]:
     """Build the numbered point list from a :class:`CleanReport` and the
     cleaned arcs/circles.
 
     ``report.out_lines`` is the list of cleaned ``(p0, p1, layer)`` segments.
     ``arcs``   -- list of ``(cx, cy, r, start_angle, end_angle, layer)``.
     ``circles``-- list of ``(cx, cy, r, layer)``.
+    ``extra``  -- optional list of ``(x, y, kind)`` points to fold in (e.g.
+                  native DXF ``POINT`` entities).
     """
     line_segs = [(p0, p1) for (p0, p1, _ly) in report.out_lines]
 
@@ -105,6 +107,8 @@ def collect_points_from_report(report, arcs, circles) -> List[Point]:
     raw.extend(_curve_line_intersections(line_segs, arcs, circles))
     raw.extend(_arc_endpoints(arcs))
     raw.extend(_circle_points(circles))
+    if extra:
+        raw.extend(extra)
 
     # De-duplicate on a snap grid, merging the "kinds" of coincident points.
     merged: dict = {}
@@ -130,9 +134,22 @@ def collect_points(doc) -> Tuple[List[Point], "object"]:
     """Convenience: clean ``doc`` and return ``(points, report)``.
 
     Cleans a copy via :func:`dxfclean.core.clean_doc` and collects points from
-    the result, so the numbering matches the machinable output exactly.
+    the result, so the numbering matches the machinable output exactly. Also
+    folds in any native ``POINT`` entities from the SOURCE drawing (the cleaner
+    drops those as unhandled, but they are real coordinates the operator placed
+    and belong in the table).
     """
     from .core import clean_doc
+
+    # Native POINT entities from the source (cleaner discards them).
+    dxf_points = []
+    try:
+        for e in doc.modelspace():
+            if e.dxftype() == "POINT":
+                loc = e.dxf.location
+                dxf_points.append((loc.x, loc.y, "dxf-point"))
+    except Exception:
+        pass
 
     ndoc, report = clean_doc(doc)
     nmsp = ndoc.modelspace()
@@ -145,7 +162,8 @@ def collect_points(doc) -> Tuple[List[Point], "object"]:
         elif t == "CIRCLE":
             circles.append((e.dxf.center.x, e.dxf.center.y, e.dxf.radius,
                             e.dxf.layer))
-    return collect_points_from_report(report, arcs, circles), report
+    return (collect_points_from_report(report, arcs, circles,
+                                       extra=dxf_points), report)
 
 
 def points_as_table(points: List[Point]) -> str:
