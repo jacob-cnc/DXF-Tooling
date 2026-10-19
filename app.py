@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from dxfclean import clean_file, render  # noqa: E402
+from dxfclean import clean_file, render, collect_points, write_csv  # noqa: E402
 
 # Optional drag-and-drop support.
 try:
@@ -40,6 +40,7 @@ class App:
 
         self.src_path = None
         self.out_path = None
+        self.points = []
         self._tmpdir = tempfile.mkdtemp(prefix="dxfclean_preview_")
         self._before_img = None
         self._after_img = None
@@ -75,6 +76,30 @@ class App:
         after_frame.pack(side="left", fill="both", expand=True, padx=(4, 0))
         self.after_canvas = tk.Label(after_frame, background="white")
         self.after_canvas.pack(fill="both", expand=True)
+
+        # Points table (right rail)
+        pts_frame = ttk.LabelFrame(mid, text="Coordinate points")
+        pts_frame.pack(side="left", fill="y", padx=(8, 0))
+
+        cols = ("idx", "x", "y")
+        self.pts_tree = ttk.Treeview(pts_frame, columns=cols, show="headings",
+                                     height=20, selectmode="browse")
+        self.pts_tree.heading("idx", text="#")
+        self.pts_tree.heading("x", text="X")
+        self.pts_tree.heading("y", text="Y")
+        self.pts_tree.column("idx", width=44, anchor="e")
+        self.pts_tree.column("x", width=92, anchor="e")
+        self.pts_tree.column("y", width=92, anchor="e")
+        pts_scroll = ttk.Scrollbar(pts_frame, orient="vertical",
+                                   command=self.pts_tree.yview)
+        self.pts_tree.configure(yscrollcommand=pts_scroll.set)
+        self.pts_tree.pack(side="top", fill="y", expand=True)
+        pts_scroll.pack(side="right", fill="y")
+
+        self.save_csv_btn = ttk.Button(pts_frame, text="Save points CSV...",
+                                       command=self.save_points_csv,
+                                       state="disabled")
+        self.save_csv_btn.pack(side="bottom", fill="x", pady=(4, 0))
 
         # Report
         bottom = ttk.LabelFrame(self.root, text="Report", padding=4)
@@ -131,6 +156,53 @@ class App:
         self.out_path = out
         self._set_report(report.as_text() + "\n\nSaved: " + out)
         self._render_async(out, which="after")
+        self._populate_points()
+
+    # -------------------------------------------------------------- points
+    def _populate_points(self):
+        """Compute the numbered coordinate points for the cleaned drawing and
+        fill the table. Runs off the SOURCE doc so numbering matches the
+        machinable output exactly."""
+        import ezdxf
+        for row in self.pts_tree.get_children():
+            self.pts_tree.delete(row)
+        self.points = []
+        if not self.src_path:
+            return
+        try:
+            doc = ezdxf.readfile(self.src_path)
+            points, _report = collect_points(doc)
+        except Exception as exc:
+            messagebox.showwarning("Points", "Could not compute points:\n%s"
+                                   % exc)
+            return
+        self.points = points
+        for p in points:
+            self.pts_tree.insert("", "end", iid=str(p.index),
+                                 values=(p.index, "%.4f" % p.x, "%.4f" % p.y))
+        self.save_csv_btn.configure(
+            state=("normal" if points else "disabled"))
+
+    def save_points_csv(self):
+        if not self.points:
+            return
+        base = os.path.splitext(self.out_path or self.src_path or "points")[0]
+        default = base + "_points.csv"
+        path = filedialog.asksaveasfilename(
+            title="Save coordinate points as CSV",
+            defaultextension=".csv",
+            initialfile=os.path.basename(default),
+            initialdir=os.path.dirname(default),
+            filetypes=[("CSV files", "*.csv")])
+        if not path:
+            return
+        try:
+            write_csv(self.points, path)
+        except Exception as exc:
+            messagebox.showerror("Save failed", str(exc))
+            return
+        messagebox.showinfo("Saved", "Wrote %d points to:\n%s"
+                            % (len(self.points), path))
 
     # ------------------------------------------------------------ preview
     def _render_async(self, path, which):
