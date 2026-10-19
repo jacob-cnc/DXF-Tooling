@@ -1,0 +1,10 @@
+# Runtime dependencies, pinned to the versions validated on the machine.
+ezdxf==1.4.5
+matplotlib==3.11.2
+
+# Optional: enables drag-and-drop in app.py. Falls back to a file picker
+# button if not installed.
+# tkinterdnd2==0.4.2
+
+# Packaging only (install when building a double-clickable .exe):
+# pyinstaller
