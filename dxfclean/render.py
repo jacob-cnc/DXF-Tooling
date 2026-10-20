@@ -58,6 +58,20 @@ def draw_dxf(ax, src: str) -> list:
                 pts = pts + pts[:1]
             xs, ys = zip(*pts)
             ax.plot(xs, ys, color=COLOR, lw=LW, solid_capstyle="round")
+        elif t == "SPLINE":
+            # Display-only: flatten the spline to a polyline so it is VISIBLE
+            # in the preview. This does NOT change the DXF -- cleanup still
+            # does its own conversion. Without this, raw splines were invisible
+            # on import and only appeared after cleanup converted them.
+            try:
+                pts = [(p.x, p.y) for p in e.flattening(0.01)]
+            except Exception:
+                pts = []
+            if len(pts) >= 2:
+                xs, ys = zip(*pts)
+                ax.plot(xs, ys, color=COLOR, lw=LW, solid_capstyle="round")
+            else:
+                skipped.append(t)
         else:
             skipped.append(t)
 
