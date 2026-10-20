@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
-import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -22,7 +20,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from dxfclean import clean_file, render, collect_points, write_csv  # noqa: E402
+from dxfclean import clean_file, draw_dxf, collect_points, write_csv  # noqa: E402
+
+import matplotlib  # noqa: E402
+matplotlib.use("TkAgg")
+from matplotlib.figure import Figure  # noqa: E402
+from matplotlib.backends.backend_tkagg import (  # noqa: E402
+    FigureCanvasTkAgg, NavigationToolbar2Tk)
 
 # Optional drag-and-drop support.
 try:
@@ -42,9 +46,6 @@ class App:
         self.src_path = None
         self.out_path = None
         self.points = []
-        self._tmpdir = tempfile.mkdtemp(prefix="dxfclean_preview_")
-        self._before_img = None
-        self._after_img = None
 
         self._build_ui()
 
@@ -99,13 +100,13 @@ class App:
 
         before_frame = ttk.LabelFrame(mid, text="Before")
         before_frame.pack(side="left", fill="both", expand=True, padx=(0, 4))
-        self.before_canvas = tk.Label(before_frame, background="white")
-        self.before_canvas.pack(fill="both", expand=True)
+        self.before_fig, self.before_ax, self.before_canvas = \
+            self._make_canvas(before_frame)
 
         after_frame = ttk.LabelFrame(mid, text="After (cleaned)")
         after_frame.pack(side="left", fill="both", expand=True, padx=(4, 0))
-        self.after_canvas = tk.Label(after_frame, background="white")
-        self.after_canvas.pack(fill="both", expand=True)
+        self.after_fig, self.after_ax, self.after_canvas = \
+            self._make_canvas(after_frame)
 
         # Report
         bottom = ttk.LabelFrame(self.root, text="Report", padding=4)
@@ -117,6 +118,37 @@ class App:
         if _HAS_DND:
             self.root.drop_target_register(DND_FILES)
             self.root.dnd_bind("<<Drop>>", self._on_drop)
+
+    # ------------------------------------------------------- canvas factory
+    def _make_canvas(self, parent):
+        """Build an interactive matplotlib canvas with a navigation toolbar
+        (zoom-box, pan, home/reset, save) and scroll-wheel zoom."""
+        fig = Figure(figsize=(5, 4), dpi=100)
+        fig.patch.set_facecolor("white")
+        ax = fig.add_subplot(111)
+        ax.set_aspect("equal")
+        ax.set_axis_off()
+        canvas = FigureCanvasTkAgg(fig, master=parent)
+        canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+        toolbar = NavigationToolbar2Tk(canvas, parent, pack_toolbar=False)
+        toolbar.update()
+        toolbar.pack(side="bottom", fill="x")
+        # scroll-wheel zoom centred on the cursor
+        canvas.mpl_connect("scroll_event",
+                           lambda ev, a=ax, c=canvas: self._on_scroll(ev, a, c))
+        return fig, ax, canvas
+
+    @staticmethod
+    def _on_scroll(event, ax, canvas):
+        if event.inaxes is not ax or event.xdata is None:
+            return
+        scale = 0.8 if event.button == "up" else 1.25   # up = zoom in
+        x0, x1 = ax.get_xlim()
+        y0, y1 = ax.get_ylim()
+        xd, yd = event.xdata, event.ydata
+        ax.set_xlim(xd - (xd - x0) * scale, xd + (x1 - xd) * scale)
+        ax.set_ylim(yd - (yd - y0) * scale, yd + (y1 - yd) * scale)
+        canvas.draw_idle()
 
     # ------------------------------------------------------------- events
     def _on_drop(self, event):
@@ -215,31 +247,24 @@ class App:
                             % (len(self.points), path))
 
     # ------------------------------------------------------------ preview
-    def _render_async(self, path, which):
-        def work():
-            png = os.path.join(self._tmpdir, which + ".png")
-            try:
-                render(path, png)
-            except Exception as exc:
-                self.root.after(0, lambda: self._set_report(
-                    "Preview render failed: %s" % exc))
-                return
-            self.root.after(0, lambda: self._show_png(png, which))
-        threading.Thread(target=work, daemon=True).start()
+    def _render_into(self, path, which):
+        """Draw ``path`` into the Before/After interactive axes."""
+        ax = self.before_ax if which == "before" else self.after_ax
+        canvas = self.before_canvas if which == "before" else self.after_canvas
+        ax.clear()
+        ax.set_aspect("equal")
+        ax.set_axis_off()
+        try:
+            draw_dxf(ax, path)
+        except Exception as exc:
+            self._set_report("Preview render failed: %s" % exc)
+            return
+        canvas.draw_idle()
 
-    def _show_png(self, png, which):
-        img = tk.PhotoImage(file=png)
-        # Downsample large PNGs so they fit the pane without extra deps.
-        pane_w = max(self.before_canvas.winfo_width(), 400)
-        factor = max(1, img.width() // pane_w + 1)
-        if factor > 1:
-            img = img.subsample(factor, factor)
-        if which == "before":
-            self._before_img = img
-            self.before_canvas.configure(image=img)
-        else:
-            self._after_img = img
-            self.after_canvas.configure(image=img)
+    def _render_async(self, path, which):
+        # Drawing touches Tk/matplotlib state, so do it on the main thread.
+        # (File parse is fast; this keeps the canvas thread-safe.)
+        self.root.after(0, lambda: self._render_into(path, which))
 
     def _set_report(self, text):
         self.report.configure(state="normal")

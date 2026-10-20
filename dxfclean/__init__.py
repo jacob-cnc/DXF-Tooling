@@ -9,11 +9,11 @@ Public API:
     Point                     -- one numbered coordinate (index, x, y, kinds)
 """
 from .core import clean_doc, clean_file, CleanReport, TOL, merge_overlapping_lines
-from .render import render
+from .render import render, draw_dxf
 from .points import (collect_points, collect_points_from_report, Point,
                      points_as_table, points_as_csv, write_csv)
 
-__all__ = ["clean_doc", "clean_file", "CleanReport", "TOL", "render",
+__all__ = ["clean_doc", "clean_file", "CleanReport", "TOL", "render", "draw_dxf",
            "merge_overlapping_lines",
            "collect_points", "collect_points_from_report", "Point",
            "points_as_table", "points_as_csv", "write_csv"]
