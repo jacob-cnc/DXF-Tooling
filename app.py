@@ -36,6 +36,19 @@ except Exception:
     _HAS_DND = False
 
 
+def _point_seg_distance(px, py, a, b):
+    """Shortest distance from point (px,py) to segment a-b."""
+    import math
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    L2 = dx * dx + dy * dy
+    if L2 == 0.0:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -47,6 +60,7 @@ class App:
         self.out_path = None
         self.points = []
         self._markers = {}          # iid -> matplotlib artist (one red dot each)
+        self._segments = []         # cleaned LINE segments ((x0,y0),(x1,y1))
 
         self._build_ui()
 
@@ -116,13 +130,16 @@ class App:
 
         before_frame = ttk.LabelFrame(mid, text="Before")
         before_frame.pack(side="left", fill="both", expand=True, padx=(0, 4))
-        self.before_fig, self.before_ax, self.before_canvas = \
-            self._make_canvas(before_frame)
+        self.before_fig, self.before_ax, self.before_canvas, \
+            self.before_toolbar = self._make_canvas(before_frame)
 
         after_frame = ttk.LabelFrame(mid, text="After (cleaned)")
         after_frame.pack(side="left", fill="both", expand=True, padx=(4, 0))
-        self.after_fig, self.after_ax, self.after_canvas = \
-            self._make_canvas(after_frame)
+        self.after_fig, self.after_ax, self.after_canvas, \
+            self.after_toolbar = self._make_canvas(after_frame)
+        # Click a segment in the After view to select its endpoint rows.
+        self.after_canvas.mpl_connect("button_press_event",
+                                      self._on_segment_click)
 
         # Report
         bottom = ttk.LabelFrame(self.root, text="Report", padding=4)
@@ -152,7 +169,7 @@ class App:
         # scroll-wheel zoom centred on the cursor
         canvas.mpl_connect("scroll_event",
                            lambda ev, a=ax, c=canvas: self._on_scroll(ev, a, c))
-        return fig, ax, canvas
+        return fig, ax, canvas, toolbar
 
     @staticmethod
     def _on_scroll(event, ax, canvas):
@@ -235,6 +252,19 @@ class App:
                                    % exc)
             return
         self.points = points
+        # Cache the cleaned LINE segments for viewer-side hit-testing
+        # (clicking a segment in the After view selects its endpoint rows).
+        self._segments = []
+        try:
+            if self.out_path:
+                cdoc = ezdxf.readfile(self.out_path)
+                for e in cdoc.modelspace():
+                    if e.dxftype() == "LINE":
+                        self._segments.append(
+                            ((e.dxf.start.x, e.dxf.start.y),
+                             (e.dxf.end.x, e.dxf.end.y)))
+        except Exception:
+            self._segments = []
         for p in points:
             self.pts_tree.insert("", "end", iid=str(p.index),
                                  values=(p.index, "%.4f" % p.x, "%.4f" % p.y))
@@ -245,6 +275,58 @@ class App:
         self.clear_all_btn.configure(state=state)
 
     # ---------------------------------------------------- interactive points
+    def _on_segment_click(self, event):
+        """Click a LINE segment in the After view -> mark its two endpoint
+        rows in the point chart (highlight + red dots), reusing the multi-
+        marker model. Ignored while the toolbar is panning/zooming."""
+        # Respect active pan/zoom tool modes and clicks outside the axis.
+        if getattr(self.after_toolbar, "mode", ""):
+            return
+        if event.inaxes is not self.after_ax or event.xdata is None:
+            return
+        if not self._segments:
+            return
+        cx, cy = event.xdata, event.ydata
+        # Pixel-scaled pick tolerance: ~8 px converted to data units.
+        tol = self._pick_tolerance(8)
+        best = None
+        best_d = None
+        for (p0, p1) in self._segments:
+            d = _point_seg_distance(cx, cy, p0, p1)
+            if best_d is None or d < best_d:
+                best_d, best = d, (p0, p1)
+        if best is None or best_d > tol:
+            return   # click wasn't near any segment
+        # Map each endpoint to its nearest point-chart row and mark it.
+        for endpoint in best:
+            iid = self._nearest_point_iid(endpoint)
+            if iid is not None and iid not in self._markers:
+                self._mark_point(iid)
+
+    def _pick_tolerance(self, pixels):
+        """Convert a pixel pick radius to data units on the After axis."""
+        try:
+            x0, x1 = self.after_ax.get_xlim()
+            bbox = self.after_ax.get_window_extent()
+            if bbox.width <= 0:
+                return abs(x1 - x0) * 0.02
+            return abs(x1 - x0) * (pixels / bbox.width)
+        except Exception:
+            return 1.0
+
+    def _nearest_point_iid(self, xy):
+        """Return the row iid of the point nearest coordinate ``xy``."""
+        if not self.points:
+            return None
+        x, y = xy
+        best = None
+        best_d = None
+        for p in self.points:
+            d = (p.x - x) ** 2 + (p.y - y) ** 2
+            if best_d is None or d < best_d:
+                best_d, best = d, p
+        return str(best.index) if best is not None else None
+
     def _on_point_click(self, event):
         """Toggle a red marker for the clicked coordinate row. Each marked row
         stays marked (its own red dot + highlight) until it is clicked again;
@@ -350,6 +432,7 @@ class App:
         ax.clear()
         if which == "after":
             # ax.clear() wiped any marker artists; drop their stale references.
+            # _segments is repopulated by _populate_points after this render.
             self._markers = {}
         ax.set_aspect("equal")
         ax.set_axis_off()
