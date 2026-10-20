@@ -116,6 +116,11 @@ class App:
                                      command=self.clean, state="disabled")
         self.clean_btn.pack(side="right")
 
+        # Convert-splines-to-arcs toggle (G2/G3-friendly output).
+        self.arc_mode = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="Convert splines to arcs",
+                        variable=self.arc_mode).pack(side="right", padx=10)
+
         # Preview panes
         mid = ttk.Frame(self.root, padding=8)
         mid.pack(fill="both", expand=True)
@@ -259,7 +264,9 @@ class App:
         if not out:
             return
         try:
-            out, report = clean_file(self.src_path, out)
+            out, report = clean_file(self.src_path, out,
+                                     spline_to_arcs=self.arc_mode.get(),
+                                     arc_tol=0.005)
         except Exception as exc:
             messagebox.showerror("Cleanup failed", str(exc))
             return
