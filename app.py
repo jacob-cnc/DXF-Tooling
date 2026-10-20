@@ -1,6 +1,6 @@
 """DXF Cleanup -- lightweight Tkinter desktop app.
 
-Pick (or drag) a DXF in -> cleaned DXF out (default ``<name>_clean.dxf``).
+Pick (or drag) a DXF in -> cleaned DXF out (default ``CLEAN_<name>.dxf``).
 Shows a before/after preview and a short report. Local only; no network.
 
 Run with the REAL interpreter (not the Microsoft Store 'python' stub):
@@ -145,7 +145,10 @@ class App:
         if not self.src_path:
             return
         base, _ext = os.path.splitext(self.src_path)
-        default = base + "_clean.dxf"
+        # Default output name: CLEAN_<original>.dxf (prefix, not suffix).
+        _dir = os.path.dirname(base)
+        _name = os.path.basename(base)
+        default = os.path.join(_dir, "CLEAN_" + _name + ".dxf")
         out = filedialog.asksaveasfilename(
             title="Save cleaned DXF as",
             defaultextension=".dxf",

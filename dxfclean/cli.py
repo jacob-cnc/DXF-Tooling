@@ -2,7 +2,7 @@
 
 Clean (default):
     <real python> -m dxfclean.cli <in.dxf> [out.dxf]
-    If out.dxf is omitted, writes <name>_clean.dxf next to the input.
+    If out.dxf is omitted, writes CLEAN_<name>.dxf next to the input.
 
 Coordinate points table:
     <real python> -m dxfclean.cli points <in.dxf> [out.csv]

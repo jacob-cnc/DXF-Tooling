@@ -473,14 +473,16 @@ def clean_doc(doc) -> Tuple["ezdxf.document.Drawing", CleanReport]:
 
 
 def clean_file(src: str, out: str | None = None) -> Tuple[str, CleanReport]:
-    """Read ``src``, clean it, write to ``out`` (default ``<name>_clean.dxf``).
+    """Read ``src``, clean it, write to ``out`` (default ``CLEAN_<name>.dxf``).
 
     Returns ``(out_path, report)``.
     """
     if not os.path.isfile(src):
         raise FileNotFoundError(src)
     if out is None:
-        out = os.path.splitext(src)[0] + "_clean.dxf"
+        d = os.path.dirname(src)
+        stem = os.path.splitext(os.path.basename(src))[0]
+        out = os.path.join(d, "CLEAN_" + stem + ".dxf")
     doc = ezdxf.readfile(src)
     ndoc, report = clean_doc(doc)
     ndoc.saveas(out)
