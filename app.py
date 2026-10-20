@@ -46,8 +46,7 @@ class App:
         self.src_path = None
         self.out_path = None
         self.points = []
-        self._selected_idx = None   # currently-highlighted point index (1-based)
-        self._dot = None            # matplotlib artist for the red marker
+        self._markers = {}          # iid -> matplotlib artist (one red dot each)
 
         self._build_ui()
 
@@ -80,7 +79,7 @@ class App:
 
         cols = ("idx", "x", "y")
         self.pts_tree = ttk.Treeview(pts_frame, columns=cols, show="headings",
-                                     selectmode="browse")
+                                     selectmode="extended")
         self.pts_tree.heading("idx", text="#")
         self.pts_tree.heading("x", text="X")
         self.pts_tree.heading("y", text="Y")
@@ -97,11 +96,22 @@ class App:
                                        command=self.save_points_csv,
                                        state="disabled")
         self.save_csv_btn.pack(side="bottom", fill="x", pady=(4, 0))
+        # Select-all / clear-all row (above the Save button).
+        sel_row = ttk.Frame(pts_frame)
+        sel_row.pack(side="bottom", fill="x", pady=(4, 0))
+        self.sel_all_btn = ttk.Button(sel_row, text="Select all",
+                                      command=self.select_all_points,
+                                      state="disabled")
+        self.sel_all_btn.pack(side="left", fill="x", expand=True)
+        self.clear_all_btn = ttk.Button(sel_row, text="Clear all",
+                                        command=self.clear_all_points,
+                                        state="disabled")
+        self.clear_all_btn.pack(side="left", fill="x", expand=True)
         pts_scroll.pack(side="right", fill="y")
         self.pts_tree.pack(side="left", fill="both", expand=True)
-        # Click a row to drop a red dot at that point in the After view;
-        # click the same row again to clear it. Bound on Button-1 (not
-        # <<TreeviewSelect>>) so re-clicking the selected row can toggle off.
+        # Click a row to toggle a red dot at that point in the After view.
+        # Each marked row persists until clicked again; several can be marked
+        # at once. Bound on Button-1 so we fully control the toggle state.
         self.pts_tree.bind("<Button-1>", self._on_point_click)
 
         before_frame = ttk.LabelFrame(mid, text="Before")
@@ -211,7 +221,7 @@ class App:
         fill the table. Runs off the SOURCE doc so numbering matches the
         machinable output exactly."""
         import ezdxf
-        self._clear_point_marker()
+        self.clear_all_points()
         for row in self.pts_tree.get_children():
             self.pts_tree.delete(row)
         self.points = []
@@ -229,28 +239,30 @@ class App:
             self.pts_tree.insert("", "end", iid=str(p.index),
                                  values=(p.index, "%.4f" % p.x, "%.4f" % p.y))
         self.pts_count.set("%d points" % len(points))
-        self.save_csv_btn.configure(
-            state=("normal" if points else "disabled"))
+        state = "normal" if points else "disabled"
+        self.save_csv_btn.configure(state=state)
+        self.sel_all_btn.configure(state=state)
+        self.clear_all_btn.configure(state=state)
 
-    # ---------------------------------------------------- interactive point
+    # ---------------------------------------------------- interactive points
     def _on_point_click(self, event):
-        """Toggle a red marker for the clicked coordinate row.
-
-        Clicking a row highlights it and drops a red dot at that point in the
-        After (cleaned) view. Clicking the SAME row again clears both.
-        """
+        """Toggle a red marker for the clicked coordinate row. Each marked row
+        stays marked (its own red dot + highlight) until it is clicked again;
+        multiple rows can be marked at once."""
         row = self.pts_tree.identify_row(event.y)
         if not row:
             return None
-        if row == self._selected_idx:
-            # re-click the active row -> toggle OFF
-            self._clear_point_marker()
-            return "break"           # swallow so Treeview doesn't re-select
-        self._select_point(row)
-        return "break"
+        if row in self._markers:
+            self._unmark_point(row)
+        else:
+            self._mark_point(row)
+        return "break"   # swallow default so we fully control selection state
 
-    def _select_point(self, iid):
-        """Highlight row ``iid`` and draw the red dot at its coordinate."""
+    def _mark_point(self, iid):
+        """Add a red dot for row ``iid`` and highlight it (no effect if already
+        marked)."""
+        if iid in self._markers:
+            return
         try:
             idx = int(iid)
         except (TypeError, ValueError):
@@ -258,40 +270,56 @@ class App:
         pt = next((p for p in self.points if p.index == idx), None)
         if pt is None:
             return
-        # highlight the table row
-        self.pts_tree.selection_set(iid)
-        self.pts_tree.focus(iid)
-        self.pts_tree.see(iid)
-        self._selected_idx = iid
-        # draw / move the red dot on the After axis (the cleaned geometry)
-        if self._dot is not None:
-            try:
-                self._dot.remove()
-            except Exception:
-                pass
-            self._dot = None
-        (self._dot,) = self.after_ax.plot(
+        self.pts_tree.selection_add(iid)
+        (dot,) = self.after_ax.plot(
             [pt.x], [pt.y], marker="o", markersize=9,
             markerfacecolor="red", markeredgecolor="red", zorder=10,
             linestyle="None")
+        self._markers[iid] = dot
         self.after_canvas.draw_idle()
+        self._update_sel_count()
 
-    def _clear_point_marker(self):
-        """Remove the red dot and clear the row highlight."""
-        if self._dot is not None:
+    def _unmark_point(self, iid):
+        """Remove the red dot and highlight for one row."""
+        dot = self._markers.pop(iid, None)
+        if dot is not None:
             try:
-                self._dot.remove()
+                dot.remove()
             except Exception:
                 pass
-            self._dot = None
             self.after_canvas.draw_idle()
-        if self._selected_idx is not None:
-            try:
-                self.pts_tree.selection_remove(self._selected_idx)
-            except Exception:
-                pass
-        self._selected_idx = None
+        try:
+            self.pts_tree.selection_remove(iid)
+        except Exception:
+            pass
+        self._update_sel_count()
 
+    def select_all_points(self):
+        """Mark every point."""
+        for p in self.points:
+            self._mark_point(str(p.index))
+
+    def clear_all_points(self):
+        """Remove every marker and highlight."""
+        for iid in list(self._markers.keys()):
+            dot = self._markers.pop(iid, None)
+            if dot is not None:
+                try:
+                    dot.remove()
+                except Exception:
+                    pass
+        try:
+            self.pts_tree.selection_remove(*self.pts_tree.selection())
+        except Exception:
+            pass
+        self.after_canvas.draw_idle()
+        self._update_sel_count()
+
+    def _update_sel_count(self):
+        n = len(self._markers)
+        total = len(self.points)
+        if total:
+            self.pts_count.set("%d points  (%d selected)" % (total, n))
 
     def save_points_csv(self):
         if not self.points:
@@ -321,8 +349,8 @@ class App:
         canvas = self.before_canvas if which == "before" else self.after_canvas
         ax.clear()
         if which == "after":
-            # ax.clear() wiped any red marker artist; drop the stale reference.
-            self._dot = None
+            # ax.clear() wiped any marker artists; drop their stale references.
+            self._markers = {}
         ax.set_aspect("equal")
         ax.set_axis_off()
         try:
