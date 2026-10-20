@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+import tempfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -21,7 +22,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from dxfclean import clean_file, draw_dxf, collect_points, write_csv  # noqa: E402
+from dxfclean import (clean_file, clean_doc, draw_dxf, collect_points,  # noqa: E402
+                      write_csv)
 
 import matplotlib  # noqa: E402
 matplotlib.use("TkAgg")
@@ -41,6 +43,11 @@ except Exception:
 # Selection highlight colors.
 _SELECT_COLOR = "#228B22"   # forest green -- highlighted geometry
 _DOT_COLOR = "#1E6FE0"      # complementary blue -- coordinate marker dots
+
+
+def _close(a, b, tol=1e-4):
+    """Point equality within tol."""
+    return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
 
 
 def _point_seg_distance(px, py, a, b):
@@ -91,12 +98,18 @@ class App:
 
         self.src_path = None
         self.out_path = None
+        self._cleaned_doc = None    # in-memory cleaned doc (source of truth)
+        self._tmpdir = tempfile.mkdtemp(prefix="dxfcleanup_")
         self.points = []
         self._markers = {}          # iid -> matplotlib artist (one red dot each)
         self._segments = []         # cleaned LINE segments ((x0,y0),(x1,y1))
         self._arcs = []             # cleaned arcs (cx,cy,r,start_deg,end_deg)
         self._circles = []          # cleaned circles (cx,cy,r)
         self._geom_highlights = []  # green overlay artists for selected geometry
+        # Selected cleaned entities for Join: handle -> ("line"|"arc", params).
+        self._sel_entities = {}
+        self._rubber = None         # rubber-band rectangle artist
+        self._drag_start = None     # window-select drag anchor (data coords)
 
         self._build_ui()
 
@@ -112,9 +125,16 @@ class App:
             if _HAS_DND else "Click Choose DXF...")
         ttk.Label(top, textvariable=self.path_var).pack(side="left", padx=10)
 
-        self.clean_btn = ttk.Button(top, text="Clean + Save",
-                                     command=self.clean, state="disabled")
-        self.clean_btn.pack(side="right")
+        self.save_btn = ttk.Button(top, text="Save As...",
+                                    command=self.save, state="disabled")
+        self.save_btn.pack(side="right")
+        self.join_btn = ttk.Button(top, text="Join selected",
+                                    command=self.join_selected,
+                                    state="disabled")
+        self.join_btn.pack(side="right", padx=(0, 6))
+        self.clean_btn = ttk.Button(top, text="Clean",
+                                    command=self.clean, state="disabled")
+        self.clean_btn.pack(side="right", padx=(0, 6))
 
         # Convert-splines-to-arcs toggle (G2/G3-friendly output).
         self.arc_mode = tk.BooleanVar(value=True)
@@ -178,9 +198,14 @@ class App:
         after_frame.pack(side="left", fill="both", expand=True, padx=(4, 0))
         self.after_fig, self.after_ax, self.after_canvas, \
             self.after_toolbar = self._make_canvas(after_frame)
-        # Click a segment in the After view to select its endpoint rows.
+        # After-view interaction: a plain click selects one entity; a
+        # click-and-drag draws a rubber-band rectangle (window select).
         self.after_canvas.mpl_connect("button_press_event",
-                                      self._on_segment_click)
+                                      self._on_after_press)
+        self.after_canvas.mpl_connect("motion_notify_event",
+                                      self._on_after_motion)
+        self.after_canvas.mpl_connect("button_release_event",
+                                      self._on_after_release)
 
         # Report
         bottom = ttk.LabelFrame(self.root, text="Report", padding=4)
@@ -248,10 +273,29 @@ class App:
         self._render_async(path, which="before")
 
     def clean(self):
+        """Clean the loaded DXF IN MEMORY -- no file is written. Populates the
+        After view, points table and selectable geometry; enables Save/Join."""
         if not self.src_path:
             return
-        base, _ext = os.path.splitext(self.src_path)
-        # Default output name: CLEAN_<original>.dxf (prefix, not suffix).
+        import ezdxf
+        try:
+            doc = ezdxf.readfile(self.src_path)
+            ndoc, report = clean_doc(doc, spline_to_arcs=self.arc_mode.get(),
+                                     arc_tol=0.005)
+        except Exception as exc:
+            messagebox.showerror("Cleanup failed", str(exc))
+            return
+        self._cleaned_doc = ndoc
+        self._set_report(report.as_text()
+                         + "\n\n(Not saved yet -- use Save As...)")
+        self._refresh_after()
+        self.save_btn.configure(state="normal")
+
+    def save(self):
+        """Serialize the current in-memory cleaned doc (including any joins)."""
+        if self._cleaned_doc is None:
+            return
+        base, _ext = os.path.splitext(self.src_path or "drawing.dxf")
         _dir = os.path.dirname(base)
         _name = os.path.basename(base)
         default = os.path.join(_dir, "CLEAN_" + _name + ".dxf")
@@ -264,27 +308,100 @@ class App:
         if not out:
             return
         try:
-            out, report = clean_file(self.src_path, out,
-                                     spline_to_arcs=self.arc_mode.get(),
-                                     arc_tol=0.005)
+            self._cleaned_doc.saveas(out)
         except Exception as exc:
-            messagebox.showerror("Cleanup failed", str(exc))
+            messagebox.showerror("Save failed", str(exc))
             return
         self.out_path = out
-        self._set_report(report.as_text() + "\n\nSaved: " + out)
-        self._render_async(out, which="after")
-        self._populate_points()
+        messagebox.showinfo("Saved", "Wrote cleaned DXF to:\n%s" % out)
+
+    def join_selected(self):
+        """Fuse the selected adjacent entities into one LWPOLYLINE so the
+        ProtoTRAK chains the whole run in a single pick. The selection must
+        form a single unbroken path (else it is rejected)."""
+        if self._cleaned_doc is None or len(self._sel_entities) < 2:
+            return
+        from dxfclean import order_chain
+        geoms = list(self._sel_entities.values())
+        chain = order_chain(geoms)
+        if chain is None:
+            messagebox.showwarning(
+                "Join",
+                "The selected segments must form a single connected chain "
+                "(end-to-end, no gaps or branches). Adjust the selection and "
+                "try again.")
+            return
+        msp = self._cleaned_doc.modelspace()
+        layer = "0"
+        to_delete = []
+        for e in msp:
+            if self._entity_matches_selection(e):
+                to_delete.append(e)
+                try:
+                    layer = e.dxf.layer
+                except Exception:
+                    pass
+        for e in to_delete:
+            msp.delete_entity(e)
+        # LWPOLYLINE vertices: (x, y, start_width, end_width, bulge).
+        pts = [(v[0][0], v[0][1], 0.0, 0.0, v[1]) for v in chain]
+        msp.add_lwpolyline(pts, format="xyseb", dxfattribs={"layer": layer})
+        n = len(geoms)
+        self.clear_all_points()
+        self._refresh_after()
+        self._set_report("Joined %d segments into one polyline chain.\n"
+                         "(Not saved yet -- use Save As...)" % n)
+
+    def _entity_matches_selection(self, e) -> bool:
+        """True if a live cleaned entity corresponds to a selected geom."""
+        t = e.dxftype()
+        for g in self._sel_entities.values():
+            if g[0] == "line" and t == "LINE":
+                p0, p1 = g[1], g[2]
+                s = (e.dxf.start.x, e.dxf.start.y)
+                en = (e.dxf.end.x, e.dxf.end.y)
+                if (_close(s, p0) and _close(en, p1)) or \
+                   (_close(s, p1) and _close(en, p0)):
+                    return True
+            elif g[0] == "arc" and t == "ARC":
+                _, cx, cy, r, sa, ea = g
+                if (abs(e.dxf.center.x - cx) < 1e-4
+                        and abs(e.dxf.center.y - cy) < 1e-4
+                        and abs(e.dxf.radius - r) < 1e-4
+                        and abs(e.dxf.start_angle - sa) < 1e-3
+                        and abs(e.dxf.end_angle - ea) < 1e-3):
+                    return True
+        return False
+
+
+    def _refresh_after(self):
+        """Render the in-memory cleaned doc into the After view and rebuild the
+        points table + selectable-geometry caches from it."""
+        if self._cleaned_doc is None:
+            return
+        tmp = os.path.join(self._tmpdir, "cleaned_preview.dxf")
+        try:
+            self._cleaned_doc.saveas(tmp)
+        except Exception as exc:
+            self._set_report("Could not render cleaned doc: %s" % exc)
+            return
+        self._render_async(tmp, which="after")
+        self._populate_points_from(tmp)
 
     # -------------------------------------------------------------- points
     def _populate_points(self):
-        """Compute the numbered coordinate points for the cleaned drawing and
-        fill the table. Runs off the SOURCE doc so numbering matches the
-        machinable output exactly."""
+        """Legacy entry for backward compat; points from source doc."""
+        if self.out_path:
+            return self._populate_points_from(self.out_path)
+
+    def _populate_points_from(self, dxf_path):
+        """Compute points and build geometry caches from a cleaned DXF file."""
         import ezdxf
         self.clear_all_points()
         for row in self.pts_tree.get_children():
             self.pts_tree.delete(row)
         self.points = []
+        self._sel_entities = {}
         if not self.src_path:
             return
         try:
@@ -295,27 +412,25 @@ class App:
                                    % exc)
             return
         self.points = points
-        # Cache the cleaned geometry for viewer-side hit-testing (clicking a
-        # segment / arc / circle in the After view selects the related rows).
-        self._segments = []    # ((x0,y0),(x1,y1))
-        self._arcs = []        # (cx, cy, r, start_deg, end_deg)
-        self._circles = []     # (cx, cy, r)
+        # Cache the cleaned geometry for viewer-side hit-testing.
+        self._segments = []
+        self._arcs = []
+        self._circles = []
         try:
-            if self.out_path:
-                cdoc = ezdxf.readfile(self.out_path)
-                for e in cdoc.modelspace():
-                    t = e.dxftype()
-                    if t == "LINE":
-                        self._segments.append(
-                            ((e.dxf.start.x, e.dxf.start.y),
-                             (e.dxf.end.x, e.dxf.end.y)))
-                    elif t == "ARC":
-                        self._arcs.append(
-                            (e.dxf.center.x, e.dxf.center.y, e.dxf.radius,
-                             e.dxf.start_angle, e.dxf.end_angle))
-                    elif t == "CIRCLE":
-                        self._circles.append(
-                            (e.dxf.center.x, e.dxf.center.y, e.dxf.radius))
+            cdoc = ezdxf.readfile(dxf_path)
+            for e in cdoc.modelspace():
+                t = e.dxftype()
+                if t == "LINE":
+                    self._segments.append(
+                        ((e.dxf.start.x, e.dxf.start.y),
+                         (e.dxf.end.x, e.dxf.end.y)))
+                elif t == "ARC":
+                    self._arcs.append(
+                        (e.dxf.center.x, e.dxf.center.y, e.dxf.radius,
+                         e.dxf.start_angle, e.dxf.end_angle))
+                elif t == "CIRCLE":
+                    self._circles.append(
+                        (e.dxf.center.x, e.dxf.center.y, e.dxf.radius))
         except Exception:
             self._segments, self._arcs, self._circles = [], [], []
         for p in points:
@@ -328,6 +443,94 @@ class App:
         self.clear_all_btn.configure(state=state)
 
     # ---------------------------------------------------- interactive points
+    # ---------------------------------------------------- after-view input
+    def _on_after_press(self, event):
+        if getattr(self.after_toolbar, "mode", ""):
+            return
+        if event.inaxes is not self.after_ax or event.xdata is None:
+            return
+        self._drag_start = (event.xdata, event.ydata)
+
+    def _on_after_motion(self, event):
+        if self._drag_start is None or event.inaxes is not self.after_ax \
+                or event.xdata is None:
+            return
+        x0, y0 = self._drag_start
+        x1, y1 = event.xdata, event.ydata
+        if self._rubber is not None:
+            try:
+                self._rubber.remove()
+            except Exception:
+                pass
+        from matplotlib.patches import Rectangle
+        self._rubber = Rectangle((min(x0, x1), min(y0, y1)),
+                                 abs(x1 - x0), abs(y1 - y0),
+                                 fill=False, edgecolor=_SELECT_COLOR,
+                                 linestyle="--", lw=1.0, zorder=12)
+        self.after_ax.add_patch(self._rubber)
+        self.after_canvas.draw_idle()
+
+    def _on_after_release(self, event):
+        start = self._drag_start
+        self._drag_start = None
+        if self._rubber is not None:
+            try:
+                self._rubber.remove()
+            except Exception:
+                pass
+            self._rubber = None
+            self.after_canvas.draw_idle()
+        if getattr(self.after_toolbar, "mode", ""):
+            return
+        if start is None or event.inaxes is not self.after_ax \
+                or event.xdata is None:
+            return
+        x0, y0 = start
+        x1, y1 = event.xdata, event.ydata
+        # Treat tiny drags as a click (single pick).
+        if abs(x1 - x0) < self._pick_tolerance(4) and \
+                abs(y1 - y0) < self._pick_tolerance(4):
+            self._on_segment_click(event)
+            return
+        # Window select: everything fully inside the rectangle.
+        self._window_select(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+    def _window_select(self, xmin, ymin, xmax, ymax):
+        """Select every cleaned entity whose extent lies inside the box."""
+        def inside(p):
+            return xmin <= p[0] <= xmax and ymin <= p[1] <= ymax
+
+        for (p0, p1) in self._segments:
+            if inside(p0) and inside(p1):
+                self._select_geom(("line", p0, p1), [p0, p1])
+        for (cx, cy, r, sa, ea) in self._arcs:
+            e0 = (cx + r * math.cos(math.radians(sa)),
+                  cy + r * math.sin(math.radians(sa)))
+            e1 = (cx + r * math.cos(math.radians(ea)),
+                  cy + r * math.sin(math.radians(ea)))
+            # include an arc if its bounding box is inside the window
+            if (xmin <= cx - r and cx + r <= xmax
+                    and ymin <= cy - r and cy + r <= ymax):
+                self._select_geom(("arc", cx, cy, r, sa, ea), [e0, e1])
+        for (ox, oy, r) in self._circles:
+            if (xmin <= ox - r and ox + r <= xmax
+                    and ymin <= oy - r and oy + r <= ymax):
+                quads = [(ox, oy)]
+                for ang in (0.0, 90.0, 180.0, 270.0):
+                    rad = math.radians(ang)
+                    quads.append((ox + r * math.cos(rad),
+                                  oy + r * math.sin(rad)))
+                self._select_geom(("circle", ox, oy, r), quads)
+
+    def _select_geom(self, geom, targets):
+        """Highlight a geom, record it for Join, and mark its point rows."""
+        self._highlight_geometry(geom)
+        self._add_selected_entity(geom)
+        for xy in targets:
+            iid = self._nearest_point_iid(xy)
+            if iid is not None and iid not in self._markers:
+                self._mark_point(iid)
+
     def _on_segment_click(self, event):
         """Click a LINE / ARC / CIRCLE in the After view -> mark the related
         point-chart rows (highlight + red dots), reusing the multi-marker
@@ -387,11 +590,23 @@ class App:
 
         # Forest-green highlight of the clicked geometry itself.
         self._highlight_geometry(best_geom)
+        # Record the selected entity for a possible Join.
+        self._add_selected_entity(best_geom)
         # Blue dots + row highlights for the related coordinate points.
         for xy in best_targets:
             iid = self._nearest_point_iid(xy)
             if iid is not None and iid not in self._markers:
                 self._mark_point(iid)
+
+    def _add_selected_entity(self, geom):
+        """Record a clicked cleaned entity for Join, keyed by a signature."""
+        if not geom:
+            return
+        key = repr(tuple(round(v, 6) if isinstance(v, float) else v
+                         for v in geom))
+        self._sel_entities[key] = geom
+        if self.join_btn is not None and len(self._sel_entities) >= 2:
+            self.join_btn.configure(state="normal")
 
     def _highlight_geometry(self, geom):
         """Draw a forest-green overlay on top of the selected entity."""
@@ -516,6 +731,9 @@ class App:
             except Exception:
                 pass
         self._geom_highlights = []
+        self._sel_entities = {}
+        if getattr(self, "join_btn", None) is not None:
+            self.join_btn.configure(state="disabled")
         self.after_canvas.draw_idle()
         self._update_sel_count()
 

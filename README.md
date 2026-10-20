@@ -64,9 +64,18 @@ Python and needs nothing extra.
 & "C:\Users\jhonick\AppData\Local\Python\pythoncore-3.15-64\python.exe" app.py
 ```
 
-Pick (or drag) a DXF in → it writes `<name>_clean.dxf`, shows a **before/after**
-preview, and a short report: entity counts in/out, lines split, segments
-dropped, splines converted, and any warnings.
+Pick (or drag) a DXF in. The workflow is three explicit steps:
+
+1. **Clean** -- runs cleanup **in memory** (no file written), shows the
+   before/after preview, the coordinate-points table, and a report (entity
+   counts in/out, lines split, overlaps merged, splines converted/arc-fitted,
+   warnings). The cleaned result is now interactive and selectable.
+2. **Join selected** *(optional)* -- select adjacent cleaned segments (click
+   them, or click-and-drag a rubber-band **window select**), then Join fuses a
+   single connected chain into one `LWPOLYLINE` so the ProtoTRAK chains the
+   whole run in a single pick. A disjoint/branching selection is rejected.
+3. **Save As...** -- writes the current in-memory result (including any joins)
+   to a `CLEAN_<name>.dxf` of your choosing.
 
 ## Command line (headless / scripting)
 
