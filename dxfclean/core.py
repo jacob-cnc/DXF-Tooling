@@ -57,6 +57,189 @@ def line_circle_params(a, b, cx, cy, r):
 
 
 # --------------------------------------------------------------------------
+# Overlapping-line merge  (NEW -- runs BEFORE the proven splitter)
+# --------------------------------------------------------------------------
+# Absolute distance tolerances for deciding two segments are the SAME line.
+# These are drawing-unit absolutes (mm), chosen well below any machinable
+# feature and safely above float noise.
+_MERGE_DIST = 1e-6     # max perpendicular offset to be "collinear"
+_MERGE_ANG = 1e-6      # max direction mismatch (sin of angle between dirs)
+
+
+def merge_overlapping_lines(segs, layers):
+    """Merge collinear, overlapping line segments into their union.
+
+    ProtoTRAK chaining breaks when two LINE entities sit on top of each other
+    (a duplicate, or a short line lying along a longer one): the control can
+    chain the duplicate and emit a doubled or zero-feed move. The proven
+    splitter never removed these -- it only *subdivides* geometry, by design.
+    This pass collapses them up front.
+
+    Two segments overlap when they are collinear (same infinite line, within
+    ``_MERGE_DIST`` / ``_MERGE_ANG``) **and on the same layer**, and their 1-D
+    projections onto that line share more than a single point. A connected
+    group of such segments is replaced by the maximal covered run(s) along the
+    shared line -- so a chain of touching/overlapping colinear pieces becomes
+    one segment, but two colinear pieces with a real GAP between them stay as
+    two (the gap is preserved, never bridged).
+
+    Layers are preserved: segments on different layers are never merged with
+    each other. Direction is normalised; the returned segment keeps the
+    group's extreme endpoints.
+
+    Parameters
+    ----------
+    segs   : list of ((x,y),(x,y))
+    layers : list of layer names, parallel to ``segs``
+
+    Returns
+    -------
+    (new_segs, new_layers, merged_count)
+        ``merged_count`` is how many input segments were absorbed into
+        another (i.e. ``len(segs) - len(new_segs)``, never negative).
+    """
+    n = len(segs)
+    if n < 2:
+        return list(segs), list(layers), 0
+
+    # Pre-compute per-segment direction, length and a canonical line key.
+    info = []
+    for (a, b) in segs:
+        (ax, ay), (bx, by) = a, b
+        dx, dy = bx - ax, by - ay
+        L = math.hypot(dx, dy)
+        if L == 0:
+            info.append(None)   # degenerate; left untouched, splitter drops it
+            continue
+        ux, uy = dx / L, dy / L
+        info.append((ax, ay, ux, uy, L))
+
+    def collinear(i, j):
+        """True if segs i and j lie on the same infinite line (same layer)."""
+        if info[i] is None or info[j] is None:
+            return False
+        if layers[i] != layers[j]:
+            return False
+        ax, ay, ux, uy, _ = info[i]
+        bx, by, vx, vy, _ = info[j]
+        # parallel? cross product of unit directions ~ 0
+        if abs(ux * vy - uy * vx) > _MERGE_ANG:
+            return False
+        # j's start offset from i's line (perpendicular distance)
+        wx, wy = bx - ax, by - ay
+        perp = abs(wx * (-uy) + wy * ux)
+        return perp <= _MERGE_DIST
+
+    # Union-Find over collinear segments.
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    for i in range(n):
+        if info[i] is None:
+            continue
+        for j in range(i + 1, n):
+            if collinear(i, j):
+                union(i, j)
+
+    # Group indices by their representative.
+    groups: dict = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    new_segs, new_layers = [], []
+    merged_count = 0
+
+    for root, members in groups.items():
+        real = [m for m in members if info[m] is not None]
+        if not real:
+            # all-degenerate group: pass through so splitter handles drops
+            for m in members:
+                new_segs.append(segs[m])
+                new_layers.append(layers[m])
+            continue
+        if len(real) == 1:
+            m = real[0]
+            new_segs.append(segs[m])
+            new_layers.append(layers[m])
+            continue
+
+        # Shared line: use the first real member's origin + direction.
+        ax, ay, ux, uy, _ = info[real[0]]
+        layer = layers[real[0]]
+
+        # Project every input onto the line as [lo, hi] scalar intervals.
+        intervals = []
+        for m in real:
+            (p0, p1) = segs[m]
+            t0 = (p0[0] - ax) * ux + (p0[1] - ay) * uy
+            t1 = (p1[0] - ax) * ux + (p1[1] - ay) * uy
+            intervals.append((min(t0, t1), max(t0, t1)))
+
+        # Does this colinear group contain a GENUINE overlap (two inputs share
+        # a sub-interval of positive length)?  Merely abutting pieces
+        # (share only an endpoint) and gapped pieces do NOT count.
+        order = sorted(range(len(intervals)), key=lambda m: intervals[m])
+        has_overlap = False
+        for a_i in range(len(order)):
+            lo_a, hi_a = intervals[order[a_i]]
+            for b_i in range(a_i + 1, len(order)):
+                lo_b, hi_b = intervals[order[b_i]]
+                if lo_b >= hi_a - _MERGE_DIST:
+                    break            # sorted: no later interval can overlap
+                # shared span length = min(hi) - max(lo)
+                shared = min(hi_a, hi_b) - max(lo_a, lo_b)
+                if shared > _MERGE_DIST:
+                    has_overlap = True
+                    break
+            if has_overlap:
+                break
+
+        if not has_overlap:
+            # No duplicated coverage: leave every member EXACTLY as-is so the
+            # proven splitter sees the original geometry (abutting splits and
+            # real gaps are preserved byte-for-byte).
+            for m in real:
+                new_segs.append(segs[m])
+                new_layers.append(layers[m])
+            continue
+
+        # Genuine overlap present: collapse to maximal covered run(s), fusing
+        # overlapping/abutting coverage but NEVER bridging a real gap. The
+        # proven splitter runs afterwards and re-breaks each run at every
+        # true intersection, so legitimate break points are restored by it.
+        intervals.sort()
+        runs = []
+        cur_lo, cur_hi = intervals[0]
+        for lo, hi in intervals[1:]:
+            if lo <= cur_hi + _MERGE_DIST:    # overlapping or touching -> extend
+                cur_hi = max(cur_hi, hi)
+            else:                              # real gap -> close run
+                runs.append((cur_lo, cur_hi))
+                cur_lo, cur_hi = lo, hi
+        runs.append((cur_lo, cur_hi))
+
+        for (lo, hi) in runs:
+            p0 = (ax + ux * lo, ay + uy * lo)
+            p1 = (ax + ux * hi, ay + uy * hi)
+            new_segs.append((p0, p1))
+            new_layers.append(layer)
+
+        merged_count += max(0, len(real) - len(runs))
+
+    return new_segs, new_layers, merged_count
+
+
+# --------------------------------------------------------------------------
 # Report
 # --------------------------------------------------------------------------
 @dataclass
@@ -70,6 +253,7 @@ class CleanReport:
     splines_in: int = 0
     splines_converted: int = 0
     segments_dropped: int = 0
+    overlaps_merged: int = 0
     other_dropped: int = 0
     warnings: List[str] = field(default_factory=list)
     out_lines: List[Tuple[Tuple[float, float], Tuple[float, float], str]] = \
@@ -90,6 +274,7 @@ class CleanReport:
             "Entities out: %d lines, %d arcs, %d circles"
             % (self.lines_out, self.arcs, self.circles),
             "Lines split (extra segments): %d" % self.lines_split,
+            "Overlapping lines merged: %d" % self.overlaps_merged,
             "Segments dropped (zero-length): %d" % self.segments_dropped,
             "Splines converted: %d / %d"
             % (self.splines_converted, self.splines_in),
@@ -194,6 +379,12 @@ def clean_doc(doc) -> Tuple["ezdxf.document.Drawing", CleanReport]:
     for (p0, p1, ly) in extra_line_segs:
         line_segs.append((p0, p1))
         line_layers.append(ly)
+
+    # NEW: merge collinear overlapping/duplicate lines into their union BEFORE
+    # splitting, so the proven splitter never sees stacked duplicates. Runs
+    # per-layer; gaps between colinear pieces are preserved.
+    line_segs, line_layers, report.overlaps_merged = \
+        merge_overlapping_lines(line_segs, line_layers)
 
     new_lines = []  # (p0, p1, layer)
     dropped = 0
