@@ -26,6 +26,7 @@ from dxfclean import clean_file, draw_dxf, collect_points, write_csv  # noqa: E4
 import matplotlib  # noqa: E402
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure  # noqa: E402
+from matplotlib.patches import Arc as MplArc, Circle as MplCircle  # noqa: E402
 from matplotlib.backends.backend_tkagg import (  # noqa: E402
     FigureCanvasTkAgg, NavigationToolbar2Tk)
 
@@ -35,6 +36,11 @@ try:
     _HAS_DND = True
 except Exception:
     _HAS_DND = False
+
+
+# Selection highlight colors.
+_SELECT_COLOR = "#228B22"   # forest green -- highlighted geometry
+_DOT_COLOR = "#1E6FE0"      # complementary blue -- coordinate marker dots
 
 
 def _point_seg_distance(px, py, a, b):
@@ -90,6 +96,7 @@ class App:
         self._segments = []         # cleaned LINE segments ((x0,y0),(x1,y1))
         self._arcs = []             # cleaned arcs (cx,cy,r,start_deg,end_deg)
         self._circles = []          # cleaned circles (cx,cy,r)
+        self._geom_highlights = []  # green overlay artists for selected geometry
 
         self._build_ui()
 
@@ -334,12 +341,14 @@ class App:
 
         best_d = None
         best_targets = None   # list of (x, y) coords whose rows to mark
+        best_geom = None      # ("line", p0, p1) / ("arc", ...) / ("circle", ...)
 
         # Lines: distance to the segment; targets = both endpoints.
         for (p0, p1) in self._segments:
             d = _point_seg_distance(cx, cy, p0, p1)
             if best_d is None or d < best_d:
                 best_d, best_targets = d, [p0, p1]
+                best_geom = ("line", p0, p1)
 
         # Arcs: distance to the arc curve (radial, but only on the sweep);
         # targets = the two sweep endpoints.
@@ -352,6 +361,7 @@ class App:
                     ends.append((ax0 + r * math.cos(rad),
                                  ay0 + r * math.sin(rad)))
                 best_d, best_targets = d, ends
+                best_geom = ("arc", ax0, ay0, r, sa, ea)
 
         # Circles: radial distance to the ring; targets = centre + 4 quadrants.
         for (ox, oy, r) in self._circles:
@@ -363,14 +373,44 @@ class App:
                     quads.append((ox + r * math.cos(rad),
                                   oy + r * math.sin(rad)))
                 best_d, best_targets = d, quads
+                best_geom = ("circle", ox, oy, r)
 
         if best_targets is None or best_d > tol:
             return   # click wasn't near any geometry
 
+        # Forest-green highlight of the clicked geometry itself.
+        self._highlight_geometry(best_geom)
+        # Blue dots + row highlights for the related coordinate points.
         for xy in best_targets:
             iid = self._nearest_point_iid(xy)
             if iid is not None and iid not in self._markers:
                 self._mark_point(iid)
+
+    def _highlight_geometry(self, geom):
+        """Draw a forest-green overlay on top of the selected entity."""
+        if not geom:
+            return
+        kind = geom[0]
+        artist = None
+        if kind == "line":
+            _, p0, p1 = geom
+            (artist,) = self.after_ax.plot(
+                [p0[0], p1[0]], [p0[1], p1[1]], color=_SELECT_COLOR,
+                lw=3.0, solid_capstyle="round", zorder=9)
+        elif kind == "arc":
+            _, ax0, ay0, r, sa, ea = geom
+            artist = MplArc((ax0, ay0), r * 2, r * 2, angle=0,
+                            theta1=sa, theta2=ea, edgecolor=_SELECT_COLOR,
+                            lw=3.0, zorder=9)
+            self.after_ax.add_patch(artist)
+        elif kind == "circle":
+            _, ox, oy, r = geom
+            artist = MplCircle((ox, oy), r, fill=False,
+                               edgecolor=_SELECT_COLOR, lw=3.0, zorder=9)
+            self.after_ax.add_patch(artist)
+        if artist is not None:
+            self._geom_highlights.append(artist)
+            self.after_canvas.draw_idle()
 
     def _pick_tolerance(self, pixels):
         """Convert a pixel pick radius to data units on the After axis."""
@@ -424,8 +464,8 @@ class App:
         self.pts_tree.selection_add(iid)
         (dot,) = self.after_ax.plot(
             [pt.x], [pt.y], marker="o", markersize=9,
-            markerfacecolor="red", markeredgecolor="red", zorder=10,
-            linestyle="None")
+            markerfacecolor=_DOT_COLOR, markeredgecolor=_DOT_COLOR,
+            zorder=11, linestyle="None")
         self._markers[iid] = dot
         self.after_canvas.draw_idle()
         self._update_sel_count()
@@ -463,6 +503,12 @@ class App:
             self.pts_tree.selection_remove(*self.pts_tree.selection())
         except Exception:
             pass
+        for art in self._geom_highlights:
+            try:
+                art.remove()
+            except Exception:
+                pass
+        self._geom_highlights = []
         self.after_canvas.draw_idle()
         self._update_sel_count()
 
@@ -500,9 +546,10 @@ class App:
         canvas = self.before_canvas if which == "before" else self.after_canvas
         ax.clear()
         if which == "after":
-            # ax.clear() wiped any marker artists; drop their stale references.
+            # ax.clear() wiped any overlay artists; drop their stale refs.
             # Geometry caches are repopulated by _populate_points after render.
             self._markers = {}
+            self._geom_highlights = []
         ax.set_aspect("equal")
         ax.set_axis_off()
         try:
