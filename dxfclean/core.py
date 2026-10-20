@@ -28,6 +28,14 @@ import ezdxf
 # Coincidence tolerance (relative). Matches the proven PoC exactly.
 TOL = 1e-7
 
+# Curvature-adaptive spline flattening (see _spline_to_lines). The chord-error
+# tolerance is set RELATIVE to each spline's bounding-box diagonal, then
+# clamped to an absolute floor/ceiling. _SPLINE_REL_TOL ~ 0.1% of the curve
+# size gives faithful curves without over-segmenting straight runs.
+_SPLINE_REL_TOL = 1e-3     # chord error as a fraction of the spline's bbox diag
+_SPLINE_MIN_TOL = 1e-3     # absolute floor (drawing units) -- avoids over-fine
+_SPLINE_MAX_TOL = 0.5      # absolute ceiling -- keeps big curves faithful
+
 
 # --------------------------------------------------------------------------
 # Proven geometry helpers -- ported verbatim from split_lines_at_intersections
@@ -57,6 +65,201 @@ def line_circle_params(a, b, cx, cy, r):
 
 
 # --------------------------------------------------------------------------
+# Overlapping-line merge  (NEW -- runs BEFORE the proven splitter)
+# --------------------------------------------------------------------------
+# Absolute distance tolerances for deciding two segments are the SAME line.
+# These are drawing-unit absolutes (mm), chosen well below any machinable
+# feature and safely above float noise. Kept deliberately LOOSER than
+# LibreCAD's RS_TOLERANCE (1e-10): that is tuned for clean model geometry,
+# whereas messy CAD-exported DXFs need a more forgiving merge threshold.
+_MERGE_DIST = 1e-6      # max perpendicular offset to be "collinear"
+_MERGE_ANG = 1e-6       # max |sin(angle)| between unit directions (parallel)
+# Squared-length floor for the zero-length test. Comparing squared lengths
+# avoids a sqrt and matches LibreCAD's isNonZeroLineLength() approach.
+_MERGE_LEN2 = _MERGE_DIST * _MERGE_DIST
+
+
+def merge_overlapping_lines(segs, layers):
+    """Merge collinear, overlapping line segments into their union.
+
+    ProtoTRAK chaining breaks when two LINE entities sit on top of each other
+    (a duplicate, or a short line lying along a longer one): the control can
+    chain the duplicate and emit a doubled or zero-feed move. The proven
+    splitter never removed these -- it only *subdivides* geometry, by design.
+    This pass collapses them up front.
+
+    Two segments overlap when they are collinear (same infinite line, within
+    ``_MERGE_DIST`` / ``_MERGE_ANG``) **and on the same layer**, and their 1-D
+    projections onto that line share more than a single point. A connected
+    group of such segments is replaced by the maximal covered run(s) along the
+    shared line -- so a chain of touching/overlapping colinear pieces becomes
+    one segment, but two colinear pieces with a real GAP between them stay as
+    two (the gap is preserved, never bridged).
+
+    Layers are preserved: segments on different layers are never merged with
+    each other. Direction is normalised; the returned segment keeps the
+    group's extreme endpoints.
+
+    Parameters
+    ----------
+    segs   : list of ((x,y),(x,y))
+    layers : list of layer names, parallel to ``segs``
+
+    Returns
+    -------
+    (new_segs, new_layers, merged_count)
+        ``merged_count`` is how many input segments were absorbed into
+        another (i.e. ``len(segs) - len(new_segs)``, never negative).
+    """
+    n = len(segs)
+    if n < 2:
+        return list(segs), list(layers), 0
+
+    # Pre-compute per-segment direction, length and a canonical line key.
+    info = []
+    for (a, b) in segs:
+        (ax, ay), (bx, by) = a, b
+        dx, dy = bx - ax, by - ay
+        L2 = dx * dx + dy * dy
+        if L2 <= _MERGE_LEN2:   # squared-length zero test (no sqrt)
+            info.append(None)   # degenerate; left untouched, splitter drops it
+            continue
+        L = math.sqrt(L2)
+        ux, uy = dx / L, dy / L
+        info.append((ax, ay, ux, uy, L))
+
+    def collinear(i, j):
+        """True if segs i and j lie on the same infinite line (same layer)."""
+        if info[i] is None or info[j] is None:
+            return False
+        if layers[i] != layers[j]:
+            return False
+        ax, ay, ux, uy, _ = info[i]
+        bx, by, vx, vy, _ = info[j]
+        # Parallel test: |sin(angle)| between unit directions ~ 0 (the 2D
+        # cross product of two unit vectors IS sin of the angle between them).
+        # This is the angle-based collinearity check LibreCAD uses
+        # (areLinesOnSameRay) -- more robust than perpendicular distance alone
+        # on long lines, where a tiny angular error becomes a large offset at
+        # the far end.
+        if abs(ux * vy - uy * vx) > _MERGE_ANG:
+            return False
+        # AND the lines must be coincident, not merely parallel: j's origin
+        # must lie on i's infinite line (perpendicular distance ~ 0).
+        wx, wy = bx - ax, by - ay
+        perp = abs(wx * (-uy) + wy * ux)
+        return perp <= _MERGE_DIST
+
+    # Union-Find over collinear segments.
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    for i in range(n):
+        if info[i] is None:
+            continue
+        for j in range(i + 1, n):
+            if collinear(i, j):
+                union(i, j)
+
+    # Group indices by their representative.
+    groups: dict = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    new_segs, new_layers = [], []
+    merged_count = 0
+
+    for root, members in groups.items():
+        real = [m for m in members if info[m] is not None]
+        if not real:
+            # all-degenerate group: pass through so splitter handles drops
+            for m in members:
+                new_segs.append(segs[m])
+                new_layers.append(layers[m])
+            continue
+        if len(real) == 1:
+            m = real[0]
+            new_segs.append(segs[m])
+            new_layers.append(layers[m])
+            continue
+
+        # Shared line: use the first real member's origin + direction.
+        ax, ay, ux, uy, _ = info[real[0]]
+        layer = layers[real[0]]
+
+        # Project every input onto the line as [lo, hi] scalar intervals.
+        intervals = []
+        for m in real:
+            (p0, p1) = segs[m]
+            t0 = (p0[0] - ax) * ux + (p0[1] - ay) * uy
+            t1 = (p1[0] - ax) * ux + (p1[1] - ay) * uy
+            intervals.append((min(t0, t1), max(t0, t1)))
+
+        # Does this colinear group contain a GENUINE overlap (two inputs share
+        # a sub-interval of positive length)?  Merely abutting pieces
+        # (share only an endpoint) and gapped pieces do NOT count.
+        order = sorted(range(len(intervals)), key=lambda m: intervals[m])
+        has_overlap = False
+        for a_i in range(len(order)):
+            lo_a, hi_a = intervals[order[a_i]]
+            for b_i in range(a_i + 1, len(order)):
+                lo_b, hi_b = intervals[order[b_i]]
+                if lo_b >= hi_a - _MERGE_DIST:
+                    break            # sorted: no later interval can overlap
+                # shared span length = min(hi) - max(lo)
+                shared = min(hi_a, hi_b) - max(lo_a, lo_b)
+                if shared > _MERGE_DIST:
+                    has_overlap = True
+                    break
+            if has_overlap:
+                break
+
+        if not has_overlap:
+            # No duplicated coverage: leave every member EXACTLY as-is so the
+            # proven splitter sees the original geometry (abutting splits and
+            # real gaps are preserved byte-for-byte).
+            for m in real:
+                new_segs.append(segs[m])
+                new_layers.append(layers[m])
+            continue
+
+        # Genuine overlap present: collapse to maximal covered run(s), fusing
+        # overlapping/abutting coverage but NEVER bridging a real gap. The
+        # proven splitter runs afterwards and re-breaks each run at every
+        # true intersection, so legitimate break points are restored by it.
+        intervals.sort()
+        runs = []
+        cur_lo, cur_hi = intervals[0]
+        for lo, hi in intervals[1:]:
+            if lo <= cur_hi + _MERGE_DIST:    # overlapping or touching -> extend
+                cur_hi = max(cur_hi, hi)
+            else:                              # real gap -> close run
+                runs.append((cur_lo, cur_hi))
+                cur_lo, cur_hi = lo, hi
+        runs.append((cur_lo, cur_hi))
+
+        for (lo, hi) in runs:
+            p0 = (ax + ux * lo, ay + uy * lo)
+            p1 = (ax + ux * hi, ay + uy * hi)
+            new_segs.append((p0, p1))
+            new_layers.append(layer)
+
+        merged_count += max(0, len(real) - len(runs))
+
+    return new_segs, new_layers, merged_count
+
+
+# --------------------------------------------------------------------------
 # Report
 # --------------------------------------------------------------------------
 @dataclass
@@ -70,6 +273,7 @@ class CleanReport:
     splines_in: int = 0
     splines_converted: int = 0
     segments_dropped: int = 0
+    overlaps_merged: int = 0
     other_dropped: int = 0
     warnings: List[str] = field(default_factory=list)
     out_lines: List[Tuple[Tuple[float, float], Tuple[float, float], str]] = \
@@ -90,6 +294,7 @@ class CleanReport:
             "Entities out: %d lines, %d arcs, %d circles"
             % (self.lines_out, self.arcs, self.circles),
             "Lines split (extra segments): %d" % self.lines_split,
+            "Overlapping lines merged: %d" % self.overlaps_merged,
             "Segments dropped (zero-length): %d" % self.segments_dropped,
             "Splines converted: %d / %d"
             % (self.splines_converted, self.splines_in),
@@ -108,18 +313,59 @@ class CleanReport:
 # Spline conversion (no splines allowed in output)
 # --------------------------------------------------------------------------
 def _spline_to_lines(spline, report: CleanReport):
-    """Flatten a SPLINE to a chain of short LINE segments.
+    """Flatten a SPLINE to a chain of LINE segments with CURVATURE-ADAPTIVE
+    sampling.
 
-    ezdxf's ``flattening`` produces points along the curve to a distance
-    tolerance; we emit colinear LINE segments between them. These segments
-    then go through the exact same intersection-splitting as any other line,
-    so the "no entity crosses a line interior" guarantee still holds.
+    ezdxf's ``flattening(distance)`` is already adaptive: ``distance`` is a
+    *chord-error* tolerance (max gap between the chord and the true curve) and
+    ezdxf recursively subdivides MORE where the curve bends, fewer where it is
+    nearly straight. The pitfall is a fixed absolute tolerance: 0.01 units is
+    far too tight on a large drawing (hundreds of needless segments) and too
+    coarse on a tiny one.
+
+    Following LibreCAD's model (RS_Spline::fillDisplayPoints -- chord error
+    scaled to the curve's bounding box, with a bounded segment budget), we set
+    the tolerance RELATIVE to the spline's own size:
+
+        chord_tol = clamp(_SPLINE_REL_TOL * bbox_diagonal,
+                          _SPLINE_MIN_TOL, _SPLINE_MAX_TOL)
+
+    So a 500 mm curve and a 5 mm curve both get a fidelity proportional to
+    their size -- faithful to the CAD intent, without flooding the output with
+    collinear vertices on straight runs.
 
     Returns a list of ((x,y),(x,y)) tuples, or [] (with a warning) if the
     spline cannot be sampled.
     """
+    # Estimate the curve size from whatever points the spline exposes. A
+    # spline built from FIT points may have no control_points (and vice
+    # versa), so gather both; fall back to a coarse flatten if neither is set.
+    pts_for_size = []
+    for attr in ("control_points", "fit_points"):
+        try:
+            seq = getattr(spline, attr)
+            pts_for_size.extend((p[0], p[1]) for p in seq)
+        except Exception:
+            pass
+    if len(pts_for_size) < 2:
+        try:
+            pts_for_size = [(p.x, p.y) for p in spline.flattening(1.0)]
+        except Exception:
+            pts_for_size = []
+    if len(pts_for_size) >= 2:
+        xs = [p[0] for p in pts_for_size]
+        ys = [p[1] for p in pts_for_size]
+        diag = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    else:
+        diag = 0.0
+    if diag > 0.0:
+        chord_tol = _SPLINE_REL_TOL * diag
+        chord_tol = min(max(chord_tol, _SPLINE_MIN_TOL), _SPLINE_MAX_TOL)
+    else:
+        chord_tol = _SPLINE_MIN_TOL
+
     try:
-        pts = [(p.x, p.y) for p in spline.flattening(0.01)]
+        pts = [(p.x, p.y) for p in spline.flattening(chord_tol)]
     except Exception as exc:  # pragma: no cover - defensive
         report.warnings.append(
             "SPLINE on layer %r could not be converted (%s); dropped."
@@ -194,6 +440,12 @@ def clean_doc(doc) -> Tuple["ezdxf.document.Drawing", CleanReport]:
     for (p0, p1, ly) in extra_line_segs:
         line_segs.append((p0, p1))
         line_layers.append(ly)
+
+    # NEW: merge collinear overlapping/duplicate lines into their union BEFORE
+    # splitting, so the proven splitter never sees stacked duplicates. Runs
+    # per-layer; gaps between colinear pieces are preserved.
+    line_segs, line_layers, report.overlaps_merged = \
+        merge_overlapping_lines(line_segs, line_layers)
 
     new_lines = []  # (p0, p1, layer)
     dropped = 0
@@ -282,14 +534,16 @@ def clean_doc(doc) -> Tuple["ezdxf.document.Drawing", CleanReport]:
 
 
 def clean_file(src: str, out: str | None = None) -> Tuple[str, CleanReport]:
-    """Read ``src``, clean it, write to ``out`` (default ``<name>_clean.dxf``).
+    """Read ``src``, clean it, write to ``out`` (default ``CLEAN_<name>.dxf``).
 
     Returns ``(out_path, report)``.
     """
     if not os.path.isfile(src):
         raise FileNotFoundError(src)
     if out is None:
-        out = os.path.splitext(src)[0] + "_clean.dxf"
+        d = os.path.dirname(src)
+        stem = os.path.splitext(os.path.basename(src))[0]
+        out = os.path.join(d, "CLEAN_" + stem + ".dxf")
     doc = ezdxf.readfile(src)
     ndoc, report = clean_doc(doc)
     ndoc.saveas(out)

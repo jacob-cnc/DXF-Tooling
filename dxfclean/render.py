@@ -23,12 +23,14 @@ LW = 1.8
 COLOR = "black"
 
 
-def render(src: str, out: str) -> list:
-    """Render DXF ``src`` to PNG ``out``. Returns a list of skipped type names."""
+def draw_dxf(ax, src: str) -> list:
+    """Draw DXF ``src`` onto an existing matplotlib ``ax``.
+
+    Shared by the PNG renderer and the interactive GUI canvas so both show
+    byte-identical geometry. Returns a list of skipped entity type names.
+    """
     doc = ezdxf.readfile(src)
     msp = doc.modelspace()
-
-    fig, ax = plt.subplots(figsize=(10, 5), dpi=200)
     skipped = []
 
     for e in msp:
@@ -63,6 +65,13 @@ def render(src: str, out: str) -> list:
     ax.autoscale_view()
     ax.margins(0.08)
     ax.set_axis_off()
+    return skipped
+
+
+def render(src: str, out: str) -> list:
+    """Render DXF ``src`` to PNG ``out``. Returns a list of skipped type names."""
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=200)
+    skipped = draw_dxf(ax, src)
     fig.patch.set_facecolor("white")
     fig.savefig(out, dpi=200, facecolor="white", bbox_inches="tight",
                 pad_inches=0.15)

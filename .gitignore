@@ -26,5 +26,6 @@ Thumbs.db
 
 # App output / scratch (keep committed example outputs under examples/ & docs/)
 *_clean.dxf
+CLEAN_*.dxf
 *_segmented.dxf
 preview_*.png
