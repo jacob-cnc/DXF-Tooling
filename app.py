@@ -496,23 +496,34 @@ class App:
         self._window_select(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
     def _window_select(self, xmin, ymin, xmax, ymax):
-        """Select every cleaned entity whose extent lies inside the box."""
+        """Select every cleaned entity whose VISIBLE extent lies inside the
+        box. Arcs are tested by their actual swept portion, not their full
+        bounding circle (a fitted arc is a sliver of a huge circle, so the
+        bounding-circle test wrongly rejected them)."""
         def inside(p):
             return xmin <= p[0] <= xmax and ymin <= p[1] <= ymax
+
+        def sweep_points(cx, cy, r, sa, ea, n=16):
+            sweep = (ea - sa) % 360.0        # CCW magnitude
+            if sweep == 0:
+                sweep = 360.0
+            return [(cx + r * math.cos(math.radians(sa + sweep * k / n)),
+                     cy + r * math.sin(math.radians(sa + sweep * k / n)))
+                    for k in range(n + 1)]
 
         for (p0, p1) in self._segments:
             if inside(p0) and inside(p1):
                 self._select_geom(("line", p0, p1), [p0, p1])
         for (cx, cy, r, sa, ea) in self._arcs:
-            e0 = (cx + r * math.cos(math.radians(sa)),
-                  cy + r * math.sin(math.radians(sa)))
-            e1 = (cx + r * math.cos(math.radians(ea)),
-                  cy + r * math.sin(math.radians(ea)))
-            # include an arc if its bounding box is inside the window
-            if (xmin <= cx - r and cx + r <= xmax
-                    and ymin <= cy - r and cy + r <= ymax):
+            # Arc is selected only if its whole visible sweep is in the box.
+            if all(inside(p) for p in sweep_points(cx, cy, r, sa, ea)):
+                e0 = (cx + r * math.cos(math.radians(sa)),
+                      cy + r * math.sin(math.radians(sa)))
+                e1 = (cx + r * math.cos(math.radians(ea)),
+                      cy + r * math.sin(math.radians(ea)))
                 self._select_geom(("arc", cx, cy, r, sa, ea), [e0, e1])
         for (ox, oy, r) in self._circles:
+            # A full circle: its bounding box must fit (it has no partial sweep).
             if (xmin <= ox - r and ox + r <= xmax
                     and ymin <= oy - r and oy + r <= ymax):
                 quads = [(ox, oy)]
