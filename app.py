@@ -46,6 +46,8 @@ class App:
         self.src_path = None
         self.out_path = None
         self.points = []
+        self._selected_idx = None   # currently-highlighted point index (1-based)
+        self._dot = None            # matplotlib artist for the red marker
 
         self._build_ui()
 
@@ -97,6 +99,10 @@ class App:
         self.save_csv_btn.pack(side="bottom", fill="x", pady=(4, 0))
         pts_scroll.pack(side="right", fill="y")
         self.pts_tree.pack(side="left", fill="both", expand=True)
+        # Click a row to drop a red dot at that point in the After view;
+        # click the same row again to clear it. Bound on Button-1 (not
+        # <<TreeviewSelect>>) so re-clicking the selected row can toggle off.
+        self.pts_tree.bind("<Button-1>", self._on_point_click)
 
         before_frame = ttk.LabelFrame(mid, text="Before")
         before_frame.pack(side="left", fill="both", expand=True, padx=(0, 4))
@@ -205,6 +211,7 @@ class App:
         fill the table. Runs off the SOURCE doc so numbering matches the
         machinable output exactly."""
         import ezdxf
+        self._clear_point_marker()
         for row in self.pts_tree.get_children():
             self.pts_tree.delete(row)
         self.points = []
@@ -224,6 +231,67 @@ class App:
         self.pts_count.set("%d points" % len(points))
         self.save_csv_btn.configure(
             state=("normal" if points else "disabled"))
+
+    # ---------------------------------------------------- interactive point
+    def _on_point_click(self, event):
+        """Toggle a red marker for the clicked coordinate row.
+
+        Clicking a row highlights it and drops a red dot at that point in the
+        After (cleaned) view. Clicking the SAME row again clears both.
+        """
+        row = self.pts_tree.identify_row(event.y)
+        if not row:
+            return None
+        if row == self._selected_idx:
+            # re-click the active row -> toggle OFF
+            self._clear_point_marker()
+            return "break"           # swallow so Treeview doesn't re-select
+        self._select_point(row)
+        return "break"
+
+    def _select_point(self, iid):
+        """Highlight row ``iid`` and draw the red dot at its coordinate."""
+        try:
+            idx = int(iid)
+        except (TypeError, ValueError):
+            return
+        pt = next((p for p in self.points if p.index == idx), None)
+        if pt is None:
+            return
+        # highlight the table row
+        self.pts_tree.selection_set(iid)
+        self.pts_tree.focus(iid)
+        self.pts_tree.see(iid)
+        self._selected_idx = iid
+        # draw / move the red dot on the After axis (the cleaned geometry)
+        if self._dot is not None:
+            try:
+                self._dot.remove()
+            except Exception:
+                pass
+            self._dot = None
+        (self._dot,) = self.after_ax.plot(
+            [pt.x], [pt.y], marker="o", markersize=9,
+            markerfacecolor="red", markeredgecolor="red", zorder=10,
+            linestyle="None")
+        self.after_canvas.draw_idle()
+
+    def _clear_point_marker(self):
+        """Remove the red dot and clear the row highlight."""
+        if self._dot is not None:
+            try:
+                self._dot.remove()
+            except Exception:
+                pass
+            self._dot = None
+            self.after_canvas.draw_idle()
+        if self._selected_idx is not None:
+            try:
+                self.pts_tree.selection_remove(self._selected_idx)
+            except Exception:
+                pass
+        self._selected_idx = None
+
 
     def save_points_csv(self):
         if not self.points:
@@ -252,6 +320,9 @@ class App:
         ax = self.before_ax if which == "before" else self.after_ax
         canvas = self.before_canvas if which == "before" else self.after_canvas
         ax.clear()
+        if which == "after":
+            # ax.clear() wiped any red marker artist; drop the stale reference.
+            self._dot = None
         ax.set_aspect("equal")
         ax.set_axis_off()
         try:
