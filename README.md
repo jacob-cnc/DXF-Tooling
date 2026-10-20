@@ -13,9 +13,14 @@ core splitting algorithm (`dxfclean/core.py`) is a direct port of the original
 
 ## What it does
 
-- **No splines in output.** `SPLINE` entities are flattened to short line
-  segments, which then take part in the same intersection-splitting. Anything
-  that can't be sampled is flagged in the report and dropped.
+- **No splines in output.** `SPLINE` entities are flattened to line segments
+  with **curvature-adaptive sampling** -- more segments where the curve bends,
+  fewer on straight runs -- using a chord-error tolerance scaled to the curve's
+  size (≈0.1% of its bounding box). This keeps the output faithful to the CAD
+  curve without flooding it with vertices. The segments then take part in the
+  same intersection-splitting; anything that can't be sampled is flagged and
+  dropped. (Roadmap: converting splines to true **arcs** for G2/G3 is a planned
+  future step; today they become line segments.)
 - **Breaks every line at each intersection / touch point** (other line
   endpoints and crossings, and `ARC` / `CIRCLE` intersections on the arc's
   active sweep).

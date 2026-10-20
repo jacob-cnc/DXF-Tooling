@@ -28,6 +28,14 @@ import ezdxf
 # Coincidence tolerance (relative). Matches the proven PoC exactly.
 TOL = 1e-7
 
+# Curvature-adaptive spline flattening (see _spline_to_lines). The chord-error
+# tolerance is set RELATIVE to each spline's bounding-box diagonal, then
+# clamped to an absolute floor/ceiling. _SPLINE_REL_TOL ~ 0.1% of the curve
+# size gives faithful curves without over-segmenting straight runs.
+_SPLINE_REL_TOL = 1e-3     # chord error as a fraction of the spline's bbox diag
+_SPLINE_MIN_TOL = 1e-3     # absolute floor (drawing units) -- avoids over-fine
+_SPLINE_MAX_TOL = 0.5      # absolute ceiling -- keeps big curves faithful
+
 
 # --------------------------------------------------------------------------
 # Proven geometry helpers -- ported verbatim from split_lines_at_intersections
@@ -305,18 +313,59 @@ class CleanReport:
 # Spline conversion (no splines allowed in output)
 # --------------------------------------------------------------------------
 def _spline_to_lines(spline, report: CleanReport):
-    """Flatten a SPLINE to a chain of short LINE segments.
+    """Flatten a SPLINE to a chain of LINE segments with CURVATURE-ADAPTIVE
+    sampling.
 
-    ezdxf's ``flattening`` produces points along the curve to a distance
-    tolerance; we emit colinear LINE segments between them. These segments
-    then go through the exact same intersection-splitting as any other line,
-    so the "no entity crosses a line interior" guarantee still holds.
+    ezdxf's ``flattening(distance)`` is already adaptive: ``distance`` is a
+    *chord-error* tolerance (max gap between the chord and the true curve) and
+    ezdxf recursively subdivides MORE where the curve bends, fewer where it is
+    nearly straight. The pitfall is a fixed absolute tolerance: 0.01 units is
+    far too tight on a large drawing (hundreds of needless segments) and too
+    coarse on a tiny one.
+
+    Following LibreCAD's model (RS_Spline::fillDisplayPoints -- chord error
+    scaled to the curve's bounding box, with a bounded segment budget), we set
+    the tolerance RELATIVE to the spline's own size:
+
+        chord_tol = clamp(_SPLINE_REL_TOL * bbox_diagonal,
+                          _SPLINE_MIN_TOL, _SPLINE_MAX_TOL)
+
+    So a 500 mm curve and a 5 mm curve both get a fidelity proportional to
+    their size -- faithful to the CAD intent, without flooding the output with
+    collinear vertices on straight runs.
 
     Returns a list of ((x,y),(x,y)) tuples, or [] (with a warning) if the
     spline cannot be sampled.
     """
+    # Estimate the curve size from whatever points the spline exposes. A
+    # spline built from FIT points may have no control_points (and vice
+    # versa), so gather both; fall back to a coarse flatten if neither is set.
+    pts_for_size = []
+    for attr in ("control_points", "fit_points"):
+        try:
+            seq = getattr(spline, attr)
+            pts_for_size.extend((p[0], p[1]) for p in seq)
+        except Exception:
+            pass
+    if len(pts_for_size) < 2:
+        try:
+            pts_for_size = [(p.x, p.y) for p in spline.flattening(1.0)]
+        except Exception:
+            pts_for_size = []
+    if len(pts_for_size) >= 2:
+        xs = [p[0] for p in pts_for_size]
+        ys = [p[1] for p in pts_for_size]
+        diag = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    else:
+        diag = 0.0
+    if diag > 0.0:
+        chord_tol = _SPLINE_REL_TOL * diag
+        chord_tol = min(max(chord_tol, _SPLINE_MIN_TOL), _SPLINE_MAX_TOL)
+    else:
+        chord_tol = _SPLINE_MIN_TOL
+
     try:
-        pts = [(p.x, p.y) for p in spline.flattening(0.01)]
+        pts = [(p.x, p.y) for p in spline.flattening(chord_tol)]
     except Exception as exc:  # pragma: no cover - defensive
         report.warnings.append(
             "SPLINE on layer %r could not be converted (%s); dropped."
