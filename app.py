@@ -11,6 +11,7 @@ otherwise use the "Choose DXF..." button. Everything else is dependency-free.
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 import tkinter as tk
@@ -38,7 +39,6 @@ except Exception:
 
 def _point_seg_distance(px, py, a, b):
     """Shortest distance from point (px,py) to segment a-b."""
-    import math
     ax, ay = a
     bx, by = b
     dx, dy = bx - ax, by - ay
@@ -47,6 +47,33 @@ def _point_seg_distance(px, py, a, b):
         return math.hypot(px - ax, py - ay)
     t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _angle_in_sweep(deg, start_deg, end_deg):
+    """True if angle ``deg`` lies on the CCW sweep start->end (DXF convention)."""
+    a = deg % 360.0
+    s = start_deg % 360.0
+    e = end_deg % 360.0
+    if s <= e:
+        return s - 1e-9 <= a <= e + 1e-9
+    return a >= s - 1e-9 or a <= e + 1e-9
+
+
+def _point_arc_distance(px, py, cx, cy, r, start_deg, end_deg):
+    """Distance from (px,py) to an arc. If the click's angle is within the
+    sweep, it's the radial distance |dist-to-centre - r|; otherwise it's the
+    distance to the nearer arc endpoint."""
+    d = math.hypot(px - cx, py - cy)
+    ang = math.degrees(math.atan2(py - cy, px - cx))
+    if _angle_in_sweep(ang, start_deg, end_deg):
+        return abs(d - r)
+    best = None
+    for a_deg in (start_deg, end_deg):
+        rad = math.radians(a_deg)
+        ex, ey = cx + r * math.cos(rad), cy + r * math.sin(rad)
+        dd = math.hypot(px - ex, py - ey)
+        best = dd if best is None else min(best, dd)
+    return best if best is not None else abs(d - r)
 
 
 class App:
@@ -61,6 +88,8 @@ class App:
         self.points = []
         self._markers = {}          # iid -> matplotlib artist (one red dot each)
         self._segments = []         # cleaned LINE segments ((x0,y0),(x1,y1))
+        self._arcs = []             # cleaned arcs (cx,cy,r,start_deg,end_deg)
+        self._circles = []          # cleaned circles (cx,cy,r)
 
         self._build_ui()
 
@@ -252,19 +281,29 @@ class App:
                                    % exc)
             return
         self.points = points
-        # Cache the cleaned LINE segments for viewer-side hit-testing
-        # (clicking a segment in the After view selects its endpoint rows).
-        self._segments = []
+        # Cache the cleaned geometry for viewer-side hit-testing (clicking a
+        # segment / arc / circle in the After view selects the related rows).
+        self._segments = []    # ((x0,y0),(x1,y1))
+        self._arcs = []        # (cx, cy, r, start_deg, end_deg)
+        self._circles = []     # (cx, cy, r)
         try:
             if self.out_path:
                 cdoc = ezdxf.readfile(self.out_path)
                 for e in cdoc.modelspace():
-                    if e.dxftype() == "LINE":
+                    t = e.dxftype()
+                    if t == "LINE":
                         self._segments.append(
                             ((e.dxf.start.x, e.dxf.start.y),
                              (e.dxf.end.x, e.dxf.end.y)))
+                    elif t == "ARC":
+                        self._arcs.append(
+                            (e.dxf.center.x, e.dxf.center.y, e.dxf.radius,
+                             e.dxf.start_angle, e.dxf.end_angle))
+                    elif t == "CIRCLE":
+                        self._circles.append(
+                            (e.dxf.center.x, e.dxf.center.y, e.dxf.radius))
         except Exception:
-            self._segments = []
+            self._segments, self._arcs, self._circles = [], [], []
         for p in points:
             self.pts_tree.insert("", "end", iid=str(p.index),
                                  values=(p.index, "%.4f" % p.x, "%.4f" % p.y))
@@ -276,30 +315,60 @@ class App:
 
     # ---------------------------------------------------- interactive points
     def _on_segment_click(self, event):
-        """Click a LINE segment in the After view -> mark its two endpoint
-        rows in the point chart (highlight + red dots), reusing the multi-
-        marker model. Ignored while the toolbar is panning/zooming."""
-        # Respect active pan/zoom tool modes and clicks outside the axis.
+        """Click a LINE / ARC / CIRCLE in the After view -> mark the related
+        point-chart rows (highlight + red dots), reusing the multi-marker
+        model. Ignored while the toolbar is panning/zooming.
+
+        Row mapping:
+          * LINE   -> its two endpoints,
+          * ARC    -> its two sweep endpoints,
+          * CIRCLE -> its centre + four quadrant points.
+        The nearest geometry (within a pixel-scaled tolerance) wins.
+        """
         if getattr(self.after_toolbar, "mode", ""):
             return
         if event.inaxes is not self.after_ax or event.xdata is None:
             return
-        if not self._segments:
-            return
         cx, cy = event.xdata, event.ydata
-        # Pixel-scaled pick tolerance: ~8 px converted to data units.
         tol = self._pick_tolerance(8)
-        best = None
+
         best_d = None
+        best_targets = None   # list of (x, y) coords whose rows to mark
+
+        # Lines: distance to the segment; targets = both endpoints.
         for (p0, p1) in self._segments:
             d = _point_seg_distance(cx, cy, p0, p1)
             if best_d is None or d < best_d:
-                best_d, best = d, (p0, p1)
-        if best is None or best_d > tol:
-            return   # click wasn't near any segment
-        # Map each endpoint to its nearest point-chart row and mark it.
-        for endpoint in best:
-            iid = self._nearest_point_iid(endpoint)
+                best_d, best_targets = d, [p0, p1]
+
+        # Arcs: distance to the arc curve (radial, but only on the sweep);
+        # targets = the two sweep endpoints.
+        for (ax0, ay0, r, sa, ea) in self._arcs:
+            d = _point_arc_distance(cx, cy, ax0, ay0, r, sa, ea)
+            if best_d is None or d < best_d:
+                ends = []
+                for ang in (sa, ea):
+                    rad = math.radians(ang)
+                    ends.append((ax0 + r * math.cos(rad),
+                                 ay0 + r * math.sin(rad)))
+                best_d, best_targets = d, ends
+
+        # Circles: radial distance to the ring; targets = centre + 4 quadrants.
+        for (ox, oy, r) in self._circles:
+            d = abs(math.hypot(cx - ox, cy - oy) - r)
+            if best_d is None or d < best_d:
+                quads = [(ox, oy)]
+                for ang in (0.0, 90.0, 180.0, 270.0):
+                    rad = math.radians(ang)
+                    quads.append((ox + r * math.cos(rad),
+                                  oy + r * math.sin(rad)))
+                best_d, best_targets = d, quads
+
+        if best_targets is None or best_d > tol:
+            return   # click wasn't near any geometry
+
+        for xy in best_targets:
+            iid = self._nearest_point_iid(xy)
             if iid is not None and iid not in self._markers:
                 self._mark_point(iid)
 
@@ -432,7 +501,7 @@ class App:
         ax.clear()
         if which == "after":
             # ax.clear() wiped any marker artists; drop their stale references.
-            # _segments is repopulated by _populate_points after this render.
+            # Geometry caches are repopulated by _populate_points after render.
             self._markers = {}
         ax.set_aspect("equal")
         ax.set_axis_off()
