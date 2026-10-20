@@ -61,9 +61,14 @@ def line_circle_params(a, b, cx, cy, r):
 # --------------------------------------------------------------------------
 # Absolute distance tolerances for deciding two segments are the SAME line.
 # These are drawing-unit absolutes (mm), chosen well below any machinable
-# feature and safely above float noise.
-_MERGE_DIST = 1e-6     # max perpendicular offset to be "collinear"
-_MERGE_ANG = 1e-6      # max direction mismatch (sin of angle between dirs)
+# feature and safely above float noise. Kept deliberately LOOSER than
+# LibreCAD's RS_TOLERANCE (1e-10): that is tuned for clean model geometry,
+# whereas messy CAD-exported DXFs need a more forgiving merge threshold.
+_MERGE_DIST = 1e-6      # max perpendicular offset to be "collinear"
+_MERGE_ANG = 1e-6       # max |sin(angle)| between unit directions (parallel)
+# Squared-length floor for the zero-length test. Comparing squared lengths
+# avoids a sqrt and matches LibreCAD's isNonZeroLineLength() approach.
+_MERGE_LEN2 = _MERGE_DIST * _MERGE_DIST
 
 
 def merge_overlapping_lines(segs, layers):
@@ -107,10 +112,11 @@ def merge_overlapping_lines(segs, layers):
     for (a, b) in segs:
         (ax, ay), (bx, by) = a, b
         dx, dy = bx - ax, by - ay
-        L = math.hypot(dx, dy)
-        if L == 0:
+        L2 = dx * dx + dy * dy
+        if L2 <= _MERGE_LEN2:   # squared-length zero test (no sqrt)
             info.append(None)   # degenerate; left untouched, splitter drops it
             continue
+        L = math.sqrt(L2)
         ux, uy = dx / L, dy / L
         info.append((ax, ay, ux, uy, L))
 
@@ -122,10 +128,16 @@ def merge_overlapping_lines(segs, layers):
             return False
         ax, ay, ux, uy, _ = info[i]
         bx, by, vx, vy, _ = info[j]
-        # parallel? cross product of unit directions ~ 0
+        # Parallel test: |sin(angle)| between unit directions ~ 0 (the 2D
+        # cross product of two unit vectors IS sin of the angle between them).
+        # This is the angle-based collinearity check LibreCAD uses
+        # (areLinesOnSameRay) -- more robust than perpendicular distance alone
+        # on long lines, where a tiny angular error becomes a large offset at
+        # the far end.
         if abs(ux * vy - uy * vx) > _MERGE_ANG:
             return False
-        # j's start offset from i's line (perpendicular distance)
+        # AND the lines must be coincident, not merely parallel: j's origin
+        # must lie on i's infinite line (perpendicular distance ~ 0).
         wx, wy = bx - ax, by - ay
         perp = abs(wx * (-uy) + wy * ux)
         return perp <= _MERGE_DIST
