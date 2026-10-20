@@ -13,14 +13,15 @@ core splitting algorithm (`dxfclean/core.py`) is a direct port of the original
 
 ## What it does
 
-- **No splines in output.** `SPLINE` entities are flattened to line segments
-  with **curvature-adaptive sampling** -- more segments where the curve bends,
-  fewer on straight runs -- using a chord-error tolerance scaled to the curve's
-  size (≈0.1% of its bounding box). This keeps the output faithful to the CAD
-  curve without flooding it with vertices. The segments then take part in the
-  same intersection-splitting; anything that can't be sampled is flagged and
-  dropped. (Roadmap: converting splines to true **arcs** for G2/G3 is a planned
-  future step; today they become line segments.)
+- **Splines → arcs (default) or lines.** With **Convert splines to arcs** on
+  (the default), `SPLINE` entities are fitted to a G1-continuous chain of true
+  circular `ARC`s (plus lines where straight) via biarc interpolation
+  (`dxfclean/arcfit.py`) within a chord tolerance (default 0.005 mm). Arcs map
+  directly to CNC `G2`/`G3` and give the ProtoTRAK chaining workflow far fewer
+  segments to click. With the toggle off, splines are instead flattened to
+  line segments with **curvature-adaptive sampling** (chord error ≈0.1% of the
+  curve's bounding box). Either way, no spline survives in the output; anything
+  that can't be fitted/sampled is flagged and dropped.
 - **Breaks every line at each intersection / touch point** (other line
   endpoints and crossings, and `ARC` / `CIRCLE` intersections on the arc's
   active sweep).

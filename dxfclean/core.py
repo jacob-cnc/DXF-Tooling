@@ -272,6 +272,7 @@ class CleanReport:
     circles: int = 0
     splines_in: int = 0
     splines_converted: int = 0
+    arcs_from_splines: int = 0
     segments_dropped: int = 0
     overlaps_merged: int = 0
     other_dropped: int = 0
@@ -299,6 +300,9 @@ class CleanReport:
             "Splines converted: %d / %d"
             % (self.splines_converted, self.splines_in),
         ]
+        if self.arcs_from_splines:
+            lines.append("Arcs fitted from splines: %d"
+                         % self.arcs_from_splines)
         if self.other_dropped:
             lines.append("Unhandled entities dropped: %d" % self.other_dropped)
         if self.warnings:
@@ -389,8 +393,30 @@ def _spline_to_lines(spline, report: CleanReport):
 # --------------------------------------------------------------------------
 # Main entry point
 # --------------------------------------------------------------------------
-def clean_doc(doc) -> Tuple["ezdxf.document.Drawing", CleanReport]:
+def _arc_angles(arc) -> Tuple[float, float]:
+    """Convert an arcfit.ArcSeg to DXF (start_deg, end_deg).
+
+    DXF arcs are ALWAYS traversed counter-clockwise from start_angle to
+    end_angle. Our ArcSeg carries a cw flag; for a clockwise sweep we swap
+    the endpoints so the CCW span DXF draws is the same physical arc.
+    """
+    cx, cy = arc.center
+    a_start = math.degrees(math.atan2(arc.start[1] - cy, arc.start[0] - cx))
+    a_end = math.degrees(math.atan2(arc.end[1] - cy, arc.end[0] - cx))
+    if arc.cw:
+        a_start, a_end = a_end, a_start
+    return a_start % 360.0, a_end % 360.0
+
+
+def clean_doc(doc, spline_to_arcs=False, arc_tol=0.005
+              ) -> Tuple["ezdxf.document.Drawing", CleanReport]:
     """Clean an in-memory ezdxf document.
+
+    ``spline_to_arcs`` -- when True, SPLINE entities are fitted to a G1 chain
+    of circular ARCS (plus lines) via :mod:`dxfclean.arcfit` instead of being
+    flattened to many short line segments. Arcs map cleanly to CNC G2/G3 and
+    give the ProtoTRAK chaining workflow far fewer segments to click.
+    ``arc_tol`` -- max chord deviation (drawing units) for that arc fit.
 
     Returns ``(new_doc, report)``. Does not mutate the input document.
     """
@@ -401,6 +427,9 @@ def clean_doc(doc) -> Tuple["ezdxf.document.Drawing", CleanReport]:
     # extra_line_segs holds lines synthesized from splines; they take part in
     # splitting exactly like native LINE entities.
     extra_line_segs: List[Tuple[Tuple[float, float], Tuple[float, float], str]] = []
+    # fitted_arcs holds arcs synthesized from splines (spline_to_arcs mode):
+    # (cx, cy, r, start_deg, end_deg, layer). Emitted directly; NOT split.
+    fitted_arcs: List[Tuple[float, float, float, float, float, str]] = []
 
     for e in msp:
         t = e.dxftype()
@@ -414,12 +443,32 @@ def clean_doc(doc) -> Tuple["ezdxf.document.Drawing", CleanReport]:
                             e.dxf.layer))
         elif t == "SPLINE":
             report.splines_in += 1
-            segs = _spline_to_lines(e, report)
-            if segs:
-                report.splines_converted += 1
-                ly = e.dxf.layer
-                for (p0, p1) in segs:
-                    extra_line_segs.append((p0, p1, ly))
+            ly = e.dxf.layer
+            if spline_to_arcs:
+                from . import arcfit
+                pieces = arcfit.fit_spline(e, arc_tol)
+                if pieces:
+                    report.splines_converted += 1
+                    for pc in pieces:
+                        if isinstance(pc, arcfit.ArcSeg):
+                            sa, ea = _arc_angles(pc)
+                            fitted_arcs.append((pc.center[0], pc.center[1],
+                                                pc.radius, sa, ea, ly))
+                            report.arcs_from_splines += 1
+                        else:   # LineSeg
+                            extra_line_segs.append((pc.start, pc.end, ly))
+                else:
+                    report.warnings.append(
+                        "SPLINE on layer %r could not be arc-fitted; "
+                        "flattened instead." % ly)
+                    for (p0, p1) in _spline_to_lines(e, report):
+                        extra_line_segs.append((p0, p1, ly))
+            else:
+                segs = _spline_to_lines(e, report)
+                if segs:
+                    report.splines_converted += 1
+                    for (p0, p1) in segs:
+                        extra_line_segs.append((p0, p1, ly))
         else:
             others.append(e)
 
@@ -529,13 +578,18 @@ def clean_doc(doc) -> Tuple["ezdxf.document.Drawing", CleanReport]:
                      dxfattribs={"layer": ly})
     for (cx, cy, r, ly) in circles:
         nmsp.add_circle((cx, cy), r, dxfattribs={"layer": ly})
+    for (cx, cy, r, sa, ea, ly) in fitted_arcs:
+        nmsp.add_arc((cx, cy), r, start_angle=sa, end_angle=ea,
+                     dxfattribs={"layer": ly})
 
     return ndoc, report
 
 
-def clean_file(src: str, out: str | None = None) -> Tuple[str, CleanReport]:
+def clean_file(src: str, out: str | None = None, spline_to_arcs=False,
+               arc_tol=0.005) -> Tuple[str, CleanReport]:
     """Read ``src``, clean it, write to ``out`` (default ``CLEAN_<name>.dxf``).
 
+    ``spline_to_arcs`` / ``arc_tol`` are forwarded to :func:`clean_doc`.
     Returns ``(out_path, report)``.
     """
     if not os.path.isfile(src):
@@ -545,6 +599,7 @@ def clean_file(src: str, out: str | None = None) -> Tuple[str, CleanReport]:
         stem = os.path.splitext(os.path.basename(src))[0]
         out = os.path.join(d, "CLEAN_" + stem + ".dxf")
     doc = ezdxf.readfile(src)
-    ndoc, report = clean_doc(doc)
+    ndoc, report = clean_doc(doc, spline_to_arcs=spline_to_arcs,
+                             arc_tol=arc_tol)
     ndoc.saveas(out)
     return out, report
