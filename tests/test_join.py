@@ -12,7 +12,39 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, REPO)
 
-from dxfclean.joinseg import order_chain  # noqa: E402
+from dxfclean.joinseg import order_chain, longest_chain  # noqa: E402
+
+
+def test_longest_chain_takes_main_path_and_leaves_branch():
+    """A fork: three segments meet at (10,0). longest_chain must join the
+    longest straight run and leave the stub out (not reject everything)."""
+    main_a = ("line", (0, 0), (10, 0))
+    main_b = ("line", (10, 0), (20, 0))
+    stub = ("line", (10, 0), (10, 5))      # branch off the junction
+    chain, used, leftover, reason = longest_chain([main_a, main_b, stub])
+    assert chain is not None
+    assert len(used) == 2 and len(leftover) == 1
+    assert leftover[0] == stub
+    assert "branch" in reason
+
+
+def test_longest_chain_leaves_disconnected_piece():
+    a = ("line", (0, 0), (10, 0))
+    b = ("line", (10, 0), (20, 0))
+    far = ("line", (90, 90), (99, 90))
+    chain, used, leftover, reason = longest_chain([a, b, far])
+    assert chain is not None
+    assert far in leftover and len(used) == 2
+    assert "not connected" in reason
+
+
+def test_longest_chain_clean_run_no_leftover():
+    chain, used, leftover, reason = longest_chain(
+        [("line", (0, 0), (10, 0)),
+         ("line", (10, 0), (10, 10)),
+         ("line", (10, 10), (0, 10))])
+    assert chain is not None and not leftover and reason == ""
+    assert len(used) == 3
 
 
 def test_two_lines_connected():

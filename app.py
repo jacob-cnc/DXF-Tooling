@@ -165,6 +165,10 @@ class App:
         self._drag_start = None     # window-select drag anchor (data coords)
         self._drag_last = None      # last in-axis drag point (data coords)
         self._drag_deselect = False # True while a Ctrl-drag is in progress
+        # Provenance of joined polylines: each entry has the full vertex list,
+        # its endpoints, and the interior parent-seam points (latent vertices
+        # shown as translucent outlined dots and usable as Split locations).
+        self._join_parents = []
 
         # Optional drag-event diagnostics (DXFCLEANUP_DEBUG=1 or --debug).
         _debug = (os.environ.get("DXFCLEANUP_DEBUG") in ("1", "true", "True")
@@ -381,6 +385,7 @@ class App:
             messagebox.showerror("Cleanup failed", str(exc))
             return
         self._cleaned_doc = ndoc
+        self._join_parents = []     # fresh clean -> no joined children yet
         self._set_report(report.as_text()
                          + "\n\n(Not saved yet -- use Save As...)")
         self._refresh_after()
@@ -412,25 +417,26 @@ class App:
 
     def join_selected(self):
         """Fuse the selected adjacent entities into one LWPOLYLINE so the
-        ProtoTRAK chains the whole run in a single pick. The selection must
-        form a single unbroken path (else it is rejected)."""
+        ProtoTRAK chains the whole run in a single pick. Uses the LONGEST
+        single connected path through the selection; a branch (fork) or a
+        disconnected piece is left in place and reported rather than blocking
+        the whole join."""
         if self._cleaned_doc is None or len(self._sel_entities) < 2:
             return
-        from dxfclean import order_chain
+        from dxfclean import longest_chain
         geoms = list(self._sel_entities.values())
-        chain = order_chain(geoms)
+        chain, used_geoms, leftover, reason = longest_chain(geoms)
         if chain is None:
             messagebox.showwarning(
                 "Join",
-                "The selected segments must form a single connected chain "
-                "(end-to-end, no gaps or branches). Adjust the selection and "
-                "try again.")
+                "The selected segments don't touch end-to-end. " + (reason or "")
+                + "\nSelect segments that share endpoints and try again.")
             return
         msp = self._cleaned_doc.modelspace()
         layer = "0"
         to_delete = []
         for e in msp:
-            if self._entity_matches_selection(e):
+            if self._entity_matches_any(e, used_geoms):
                 to_delete.append(e)
                 try:
                     layer = e.dxf.layer
@@ -439,18 +445,34 @@ class App:
         for e in to_delete:
             msp.delete_entity(e)
         # LWPOLYLINE vertices: (x, y, start_width, end_width, bulge).
+        verts = [v[0] for v in chain]
         pts = [(v[0][0], v[0][1], 0.0, 0.0, v[1]) for v in chain]
         msp.add_lwpolyline(pts, format="xyseb", dxfattribs={"layer": layer})
-        n = len(geoms)
+        # Record provenance so the joined child shows its endpoints (solid) and
+        # its interior parent-seam vertices (latent dots), and so Split can cut
+        # the child back apart at any original seam.
+        interior = [verts[i] for i in range(1, len(verts) - 1)]
+        self._join_parents.append({
+            "vertices": list(verts),          # all chain points, in order
+            "endpoints": [verts[0], verts[-1]],
+            "seams": interior,                # latent parent-boundary points
+        })
+        n = len(used_geoms)
         self.clear_all_points()
         self._refresh_after()
-        self._set_report("Joined %d segments into one polyline chain.\n"
-                         "(Not saved yet -- use Save As...)" % n)
+        msg = "Joined %d segments into one polyline chain." % n
+        if leftover:
+            msg += "\nLeft out: " + reason
+        msg += "\n(Not saved yet -- use Save As...)"
+        self._set_report(msg)
+        if leftover:
+            messagebox.showinfo("Join", "Joined %d segments.\n\n%s"
+                                % (n, reason))
 
-    def _entity_matches_selection(self, e) -> bool:
-        """True if a live cleaned entity corresponds to a selected geom."""
+    def _entity_matches_any(self, e, geoms) -> bool:
+        """True if a live cleaned entity corresponds to one of ``geoms``."""
         t = e.dxftype()
-        for g in self._sel_entities.values():
+        for g in geoms:
             if g[0] == "line" and t == "LINE":
                 p0, p1 = g[1], g[2]
                 s = (e.dxf.start.x, e.dxf.start.y)
