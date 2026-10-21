@@ -4,8 +4,7 @@
 
 WHAT THIS IS
 ------------
-A small Windows tool that cleans up a DXF drawing so it chains
-cleanly on the ProtoTRAK DPM RMX control. It removes splines and
+A small Windows tool that cleans up a DXF drawing to be optimized for CNC control. It removes faceted splines and
 breaks every line where another line crosses it.
 
 There is NOTHING to install. No Python, no admin rights, no
@@ -27,10 +26,10 @@ HOW TO USE IT  (3 steps)
 2. In the tool: click "Choose DXF..." and pick your drawing.
    You will see a Before preview.
 
-3. Click "Clean + Save". It writes a NEW file named
-   <yourdrawing>_clean.dxf next to the original (your original is
-   never changed). Load that _clean.dxf onto the mill.
+3. Click "Clean". Initial optimization will occur, then you, the user, will have the opportunity to inspect individual segments,
+   their endpoints, and join or split them as you see fit. When you're ready, click save, and a new DXF will be written to your filesystem.
 
+Your DXF file is now ready for use. 
 
 IF SOMETHING LOOKS WRONG
 ------------------------
@@ -44,7 +43,7 @@ IF SOMETHING LOOKS WRONG
       file.
 
 - "My computer blocks unsigned programs entirely."
-      Ask IT to allow DXFCleanup.exe. It is an internal tool.
+      Ask IT to inspect & evaluate DXFCleanup.exe. It is an internal tool.
 
 
 QUESTIONS
