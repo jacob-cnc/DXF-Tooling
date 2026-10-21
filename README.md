@@ -185,6 +185,22 @@ Output: `dist\DXFCleanup.exe` (~44 MB, self-contained). `build.ps1` cleans the
 previous `build\`/`dist\` and runs `python -m PyInstaller --noconfirm
 DXFCleanup.spec`, so a fresh clone reproduces the same exe.
 
+### Package for sharing with coworkers
+
+`package.ps1` builds the exe (via `build.ps1`) and bundles it with the
+first-run instructions into one zip ready to send:
+
+```powershell
+.\package.ps1                 # build + package
+.\package.ps1 -SkipBuild      # package an exe already built this session
+```
+
+Output: `dist\DXFCleanup-<date>.zip` (~45 MB) containing `DXFCleanup.exe`,
+`READ-ME-FIRST.txt`, and `INSTALL.md`. Send that one file (Teams, email, shared
+drive); the recipient opens it and double-clicks `DXFCleanup.exe` — no Python,
+admin rights, or internet. The only one-time prompt is Windows SmartScreen
+(*More info → Run anyway*), which the bundled instructions explain.
+
 > **Trade-offs.** `--onefile` unpacks to a temp dir on each launch, so the
 > **first** start is a few seconds and antivirus occasionally false-flags it.
 > For a fixed shop-floor PC you can instead use `--windowed` **without**
