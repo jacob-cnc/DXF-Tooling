@@ -438,26 +438,33 @@ class App:
         messagebox.showinfo("Saved", "Wrote cleaned DXF to:\n%s" % out)
 
     def join_selected(self):
-        """Fuse the selected adjacent entities into one LWPOLYLINE so the
-        ProtoTRAK chains the whole run in a single pick. Uses the LONGEST
-        single connected path through the selection; a branch (fork) or a
-        disconnected piece is left in place and reported rather than blocking
-        the whole join."""
+        """Fuse the selected entities into one LWPOLYLINE. Already-joined
+        children in the selection are MERGED/EXTENDED: their sub-geometry is
+        fed back into the chain along with any newly selected loose segments,
+        so a user can grow an existing polyline by selecting it plus more of
+        the curve. Uses the LONGEST single connected path; a branch (fork) or
+        a disconnected piece is left in place and reported."""
         if self._cleaned_doc is None or len(self._sel_entities) < 2:
             return
         from dxfclean import longest_chain
         all_geoms = list(self._sel_entities.values())
-        # A selected joined child (("poly", i)) is already one polyline -- it
-        # cannot be a parent in a new join. Drop those so re-selecting a child
-        # and hitting Join is a no-op, not a double-join overlay.
-        geoms = [g for g in all_geoms if g and g[0] != "poly"]
-        if len(geoms) < 2:
+        loose = [g for g in all_geoms if g and g[0] != "poly"]
+        poly_idx = [g[1] for g in all_geoms if g and g[0] == "poly"]
+        # Expand each selected child into its sub-geometry so it can be merged.
+        poly_subs = []
+        for i in poly_idx:
+            if 0 <= i < len(self._polylines):
+                poly_subs.extend(self._polylines[i]["subs"])
+        # Candidate chain members: loose segments + every child's sub-segments.
+        members = loose + poly_subs
+        # Need at least two members, and the operation must do something beyond
+        # re-stating a single existing child unchanged.
+        if len(members) < 2 or (not loose and len(poly_idx) < 2):
             messagebox.showinfo(
-                "Join", "Select at least two un-joined segments to join. "
-                "A segment that is already part of a joined chain can't be "
-                "joined again.")
+                "Join", "Select at least two touching segments to join, or a "
+                "joined chain plus more segments to extend it.")
             return
-        chain, used_geoms, leftover, reason = longest_chain(geoms)
+        chain, used_geoms, leftover, reason = longest_chain(members)
         if chain is None:
             messagebox.showwarning(
                 "Join",
@@ -466,40 +473,70 @@ class App:
             return
         msp = self._cleaned_doc.modelspace()
         layer = "0"
+        # Delete the consumed loose entities.
         to_delete = []
         for e in msp:
-            if self._entity_matches_any(e, used_geoms):
+            if e.dxftype() in ("LINE", "ARC") \
+                    and self._entity_matches_any(e, used_geoms):
                 to_delete.append(e)
                 try:
                     layer = e.dxf.layer
                 except Exception:
                     pass
+        # Delete the consumed joined children (any whose sub-geom was used).
+        used_set = set(self._geom_key(g) for g in used_geoms)
+        consumed_poly_verts = []
+        for i in poly_idx:
+            subs = self._polylines[i]["subs"]
+            if any(self._geom_key(s) in used_set for s in subs):
+                consumed_poly_verts.append(self._polylines[i]["verts"])
+        for e in list(msp):
+            if e.dxftype() in ("LWPOLYLINE", "POLYLINE"):
+                if self._polyline_matches(e, consumed_poly_verts):
+                    to_delete.append(e)
         for e in to_delete:
-            msp.delete_entity(e)
+            try:
+                msp.delete_entity(e)
+            except Exception:
+                pass
         # LWPOLYLINE vertices: (x, y, start_width, end_width, bulge).
         verts = [v[0] for v in chain]
         pts = [(v[0][0], v[0][1], 0.0, 0.0, v[1]) for v in chain]
         msp.add_lwpolyline(pts, format="xyseb", dxfattribs={"layer": layer})
-        # Record provenance so the joined child shows its endpoints (solid) and
-        # its interior parent-seam vertices (latent dots), and so Split can cut
-        # the child back apart at any original seam.
         interior = [verts[i] for i in range(1, len(verts) - 1)]
         self._join_parents.append({
-            "vertices": list(verts),          # all chain points, in order
+            "vertices": list(verts),
             "endpoints": [verts[0], verts[-1]],
-            "seams": interior,                # latent parent-boundary points
+            "seams": interior,
         })
         n = len(used_geoms)
         self.clear_all_points()
         self._refresh_after()
-        msg = "Joined %d segments into one polyline chain." % n
+        extended = bool(poly_idx)
+        verb = "Extended the chain to" if extended else "Joined"
+        msg = "%s %d segments into one polyline chain." % (verb, n)
         if leftover:
             msg += "\nLeft out: " + reason
         msg += "\n(Not saved yet -- use Save As...)"
         self._set_report(msg)
         if leftover:
-            messagebox.showinfo("Join", "Joined %d segments.\n\n%s"
-                                % (n, reason))
+            messagebox.showinfo("Join", "%s %d segments.\n\n%s"
+                                % (verb, n, reason))
+
+    def _polyline_matches(self, e, verts_list) -> bool:
+        """True if polyline entity ``e`` has one of the given vertex sequences
+        (matched endpoint-to-endpoint, order-independent)."""
+        try:
+            epts = [(p[0], p[1]) for p in e.get_points("xy")]
+        except Exception:
+            return False
+        for verts in verts_list:
+            if len(epts) != len(verts):
+                continue
+            if all(_close(epts[k], verts[k]) for k in range(len(verts))) or \
+               all(_close(epts[k], verts[-1 - k]) for k in range(len(verts))):
+                return True
+        return False
 
     def _entity_matches_any(self, e, geoms) -> bool:
         """True if a live cleaned entity corresponds to one of ``geoms``."""

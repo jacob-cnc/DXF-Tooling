@@ -108,7 +108,67 @@ def test_clicking_joined_child_selects_whole_polyline():
         root.destroy()
 
 
+def test_extend_existing_child_with_more_segments():
+    """Join a few arcs into a child, then select that child + an adjacent arc
+    and Join again: the existing polyline must GROW into one longer chain, not
+    spawn a second polyline."""
+    import math
+    from types import SimpleNamespace
+    a, root = _app()
+    if a is None:
+        import pytest; pytest.skip("no Tk display")
+    try:
+        if len(a._arcs) < 5:
+            import pytest; pytest.skip("fixture produced too few arcs")
+
+        def ep(ar):
+            cx, cy, r, sa, ea = ar
+            return ((cx + r * math.cos(math.radians(sa)),
+                     cy + r * math.sin(math.radians(sa))),
+                    (cx + r * math.cos(math.radians(ea)),
+                     cy + r * math.sin(math.radians(ea))))
+
+        for ar in a._arcs[:4]:
+            a._select_geom(("arc",) + tuple(ar), [])
+        a.join_selected(); root.update()
+        assert len(a._polylines) == 1
+        v_before = len(a._polylines[0]["verts"])
+
+        # Select the child, then an arc adjacent to one of its endpoints.
+        a.clear_all_points()
+        sub = a._polylines[0]["subs"][1]
+        if sub[0] == "arc":
+            _, cx, cy, r, sa, ea = sub
+            m = math.radians((sa + ea) / 2.0)
+            px, py = cx + r * math.cos(m), cy + r * math.sin(m)
+        else:
+            px = (sub[1][0] + sub[2][0]) / 2.0
+            py = (sub[1][1] + sub[2][1]) / 2.0
+        a._on_segment_click(SimpleNamespace(inaxes=a.after_ax, xdata=px,
+                                            ydata=py, key=None))
+        ends = {a._polylines[0]["verts"][0], a._polylines[0]["verts"][-1]}
+        added = 0
+        for ar in list(a._arcs):
+            e0, e1 = ep(ar)
+            if any(math.hypot(e[0] - c[0], e[1] - c[1]) < 1e-6
+                   for e in (e0, e1) for c in ends):
+                a._select_geom(("arc",) + tuple(ar), [])
+                added += 1
+                break
+        if added == 0:
+            import pytest; pytest.skip("no arc adjacent to the child endpoints")
+
+        a.join_selected(); root.update()
+        assert len(a._polylines) == 1, \
+            "extending should keep ONE polyline, not create a second"
+        assert len(a._polylines[0]["verts"]) > v_before, \
+            "the child's chain should have grown"
+    finally:
+        root.destroy()
+
+
 if __name__ == "__main__":
     test_join_makes_one_unit_and_records_seams()
     test_clicking_joined_child_selects_whole_polyline()
+    test_extend_existing_child_with_more_segments()
     print("join seams: OK")
