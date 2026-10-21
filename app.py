@@ -277,31 +277,30 @@ class App:
             self.after_toolbar = self._make_canvas(after_frame)
         # After-view interaction: a plain click selects one entity; a
         # click-and-drag draws a rubber-band rectangle (window select).
-        self.after_canvas.mpl_connect("button_press_event",
-                                      self._on_after_press)
+        #
+        # The drag is OPENED from the Tk <ButtonPress-1>, not matplotlib's
+        # button_press_event. The log proved matplotlib reports inaxes=False /
+        # xdata=None on the press (it hasn't resolved the axes for the pointer
+        # yet) and only fills the coords in by release -- so the mpl press was
+        # being rejected and the drag never opened. Tk delivers correct pixel
+        # coords immediately; we convert them to data coords ourselves.
         self.after_canvas.mpl_connect("motion_notify_event",
                                       self._on_after_motion)
         self.after_canvas.mpl_connect("button_release_event",
                                       self._on_after_release)
+        # matplotlib press kept only as a FALLBACK opener (harmless when the Tk
+        # press already opened the drag -- it no-ops if _drag_start is set).
+        self.after_canvas.mpl_connect("button_press_event",
+                                      self._on_after_press)
+        _tkw = self.after_canvas.get_tk_widget()
+        # Authoritative drag opener: Tk press with reliable pixel coords.
+        _tkw.bind("<ButtonPress-1>", self._on_after_press_tk, add="+")
         # Tk-level release backstop. matplotlib's button_release_event is NOT
         # delivered when the mouse-up lands on the toolbar widget or past the
-        # canvas (which is why a top-to-bottom drag -- releasing toward the
-        # bottom toolbar -- missed far more often than bottom-to-top). Tk holds
-        # an implicit pointer grab from the press, so this fires regardless of
-        # where the button is released and finalizes any in-progress drag.
-        self.after_canvas.get_tk_widget().bind(
-            "<ButtonRelease-1>", self._on_after_release_tk, add="+")
-        # Diagnostic-only Tk press/motion probes: these let the log compare
-        # what Tk delivers against what matplotlib delivers, so a press that
-        # matplotlib never registers in-axis is visible. They never touch
-        # selection state -- they only log.
-        _tkw = self.after_canvas.get_tk_widget()
-        _tkw.bind("<ButtonPress-1>",
-                  lambda e: self._draglog.log("tk_press", wx=e.x, wy=e.y),
-                  add="+")
-        _tkw.bind("<Control-ButtonPress-1>",
-                  lambda e: self._draglog.log("tk_press", wx=e.x, wy=e.y,
-                                              ctrl=True), add="+")
+        # canvas. Tk holds an implicit pointer grab from the press, so this
+        # fires regardless of where the button is released and finalizes any
+        # in-progress drag.
+        _tkw.bind("<ButtonRelease-1>", self._on_after_release_tk, add="+")
 
         # Report
         bottom = ttk.LabelFrame(self.root, text="Report", padding=4)
@@ -559,11 +558,48 @@ class App:
         if event.inaxes is not self.after_ax or event.xdata is None:
             self._draglog.log("mpl_press_SKIP", why="not_in_axis")
             return
+        if self._drag_start is not None:
+            return   # Tk press already opened this drag
         self._drag_start = (event.xdata, event.ydata)
         self._drag_last = (event.xdata, event.ydata)
         # Latch the mode for the whole gesture: Ctrl = deselect, else select.
         self._drag_deselect = self._is_ctrl(event)
-        self._draglog.log("drag_open", deselect=self._drag_deselect)
+        self._draglog.log("drag_open", via="mpl", deselect=self._drag_deselect)
+
+    def _tk_to_data(self, wx, wy):
+        """Convert Tk widget pixel coords (y-down from the top) to After-axis
+        DATA coords, and report whether the point is inside the plot area.
+        matplotlib's press event is unreliable for this (it reports no axis on
+        the first press), but the axis transform always resolves a point."""
+        try:
+            disp_h = self.after_canvas.figure.bbox.height
+            px, py = float(wx), disp_h - float(wy)   # to mpl display space
+            in_axes = bool(self.after_ax.bbox.contains(px, py))
+            x, y = self.after_ax.transData.inverted().transform((px, py))
+            return x, y, in_axes
+        except Exception:
+            return None, None, False
+
+    def _on_after_press_tk(self, event):
+        """Authoritative drag opener. Tk gives correct pixel coords on the very
+        first press, unlike matplotlib. Converts to data coords and opens the
+        drag so a window gesture reliably starts regardless of drag direction."""
+        wx, wy = getattr(event, "x", None), getattr(event, "y", None)
+        ctrl = bool(getattr(event, "state", 0) & 0x0004)   # Tk Control mask
+        self._draglog.log("tk_press", wx=wx, wy=wy, ctrl=ctrl)
+        if getattr(self.after_toolbar, "mode", ""):
+            return   # pan/zoom active -- let the toolbar handle it
+        if self._drag_start is not None:
+            return   # already open
+        x, y, in_axes = self._tk_to_data(wx, wy)
+        if x is None or not in_axes:
+            self._draglog.log("tk_press_SKIP", why="not_in_axis",
+                              x=x, y=y, in_axes=in_axes)
+            return
+        self._drag_start = (x, y)
+        self._drag_last = (x, y)
+        self._drag_deselect = ctrl
+        self._draglog.log("drag_open", via="tk", deselect=ctrl, x=x, y=y)
 
     def _on_after_motion(self, event):
         if self._drag_start is None or event.inaxes is not self.after_ax \

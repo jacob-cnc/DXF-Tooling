@@ -205,6 +205,61 @@ def test_tk_backstop_fires_when_mpl_release_is_lost():
         root.destroy()
 
 
+def test_tk_press_opens_drag_from_pixel_coords():
+    """Repro of the logged root cause: matplotlib's press reports inaxes=False
+    (no data coords) so the drag never opened. The Tk press must open it from
+    pixel coords instead. Uses a REALIZED window so the axis transform is
+    valid, converts a known data point to Tk pixels via the forward transform,
+    opens the drag through _on_after_press_tk, then finishes it."""
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except Exception:
+        import pytest; pytest.skip("no Tk display")
+    try:
+        root.geometry("1320x720")
+        root.update()            # realize + lay out so transforms are valid
+        import app as A
+        a = A.App(root)
+        a.arc_mode.set(True)
+        a.src_path = FIXTURE
+        a.clean()
+        root.update()            # draw the After canvas
+        if not a._segments and not a._arcs:
+            import pytest; pytest.skip("fixture produced no geometry")
+
+        disp_h = a.after_canvas.figure.bbox.height
+
+        def data_to_tk(x, y):
+            px, py = a.after_ax.transData.transform((x, y))
+            return SimpleNamespace(x=int(round(px)),
+                                   y=int(round(disp_h - py)), state=0)
+
+        # Press at a point KNOWN to be inside the drawing. The _bbox helper is
+        # inflated by fitted-arc radii (centres far outside the part), so its
+        # centre is not on the plot; use the mean of the real LINE endpoints,
+        # which lie on the rectangle and are guaranteed inside the axes.
+        lxs, lys = [], []
+        for (p0, p1) in a._segments:
+            lxs += [p0[0], p1[0]]; lys += [p0[1], p1[1]]
+        if not lxs:
+            import pytest; pytest.skip("no line geometry to anchor the press")
+        cx_ = sum(lxs) / len(lxs)
+        cy_ = sum(lys) / len(lys)
+        press = data_to_tk(cx_, cy_)
+        a._on_after_press_tk(press)
+        assert a._drag_start is not None, \
+            "Tk press failed to open the drag from pixel coords"
+        # Drag outward + release through the mpl handlers (which resolve coords).
+        xmin, ymin = min(lxs) - 1, min(lys) - 1
+        xmax, ymax = max(lxs) + 1, max(lys) + 1
+        a._on_after_motion(_ev(xmax, ymax, a.after_ax))
+        a._on_after_release(_ev(xmax, ymax, a.after_ax))
+        assert a._drag_start is None, "drag did not finalize"
+    finally:
+        root.destroy()
+
+
 def test_no_double_fire_between_release_paths():
     """When the matplotlib release finalizes a drag, the deferred Tk backstop
     must be a no-op (it checks _drag_start, which is already cleared)."""
@@ -235,5 +290,6 @@ if __name__ == "__main__":
     test_window_gesture_fires_when_release_is_outside_axis()
     test_ctrl_window_fires_when_release_is_outside_axis()
     test_tk_backstop_fires_when_mpl_release_is_lost()
+    test_tk_press_opens_drag_from_pixel_coords()
     test_no_double_fire_between_release_paths()
     print("deselect smoke: OK")
