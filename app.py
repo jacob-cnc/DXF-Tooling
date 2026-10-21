@@ -44,6 +44,8 @@ except Exception:
 _SELECT_COLOR = "#228B22"   # forest green -- highlighted geometry
 _DOT_COLOR = "#1E6FE0"      # complementary blue -- coordinate marker dots
 _DESELECT_COLOR = "#C0392B" # red -- Ctrl-drag deselect rubber-band
+_SEAM_FILL = "#1E6FE0"      # latent parent-seam dot: blue, drawn translucent
+_SEAM_EDGE = "#0B3D91"      # latent parent-seam dot outline (darker blue)
 
 
 class _DragLog:
@@ -97,6 +99,11 @@ class _DragLog:
 def _close(a, b, tol=1e-4):
     """Point equality within tol."""
     return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
+
+
+def _dist2(a, b):
+    """Squared distance between two (x, y) points."""
+    return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
 
 
 def _point_seg_distance(px, py, a, b):
@@ -169,6 +176,9 @@ class App:
         # its endpoints, and the interior parent-seam points (latent vertices
         # shown as translucent outlined dots and usable as Split locations).
         self._join_parents = []
+        self._seam_points = []       # interior parent-seam coords (latent dots)
+        self._poly_endpoints = []    # joined-chain endpoint coords
+        self._seam_dot_artists = []  # latent-dot artists (cleared on redraw)
 
         # Optional drag-event diagnostics (DXFCLEANUP_DEBUG=1 or --debug).
         _debug = (os.environ.get("DXFCLEANUP_DEBUG") in ("1", "true", "True")
@@ -533,6 +543,11 @@ class App:
         self._segments = []
         self._arcs = []
         self._circles = []
+        # Joined-polyline provenance for this render: interior seam points get
+        # the latent (translucent + outline) dot; the two endpoints get the
+        # normal solid dot. Rebuilt from the live doc each refresh.
+        self._seam_points = []       # [(x, y), ...] interior parent seams
+        self._poly_endpoints = []    # [(x, y), ...] joined-chain endpoints
         try:
             cdoc = ezdxf.readfile(dxf_path)
             for e in cdoc.modelspace():
@@ -548,8 +563,48 @@ class App:
                 elif t == "CIRCLE":
                     self._circles.append(
                         (e.dxf.center.x, e.dxf.center.y, e.dxf.radius))
+                elif t in ("LWPOLYLINE", "POLYLINE"):
+                    # A joined child. Expand it into its real sub-segments so
+                    # each PARENT segment is individually selectable again, and
+                    # split its vertices into endpoints vs interior seams.
+                    verts = []
+                    try:
+                        for sub in e.virtual_entities():
+                            st = sub.dxftype()
+                            if st == "LINE":
+                                p0 = (sub.dxf.start.x, sub.dxf.start.y)
+                                p1 = (sub.dxf.end.x, sub.dxf.end.y)
+                                self._segments.append((p0, p1))
+                                verts.append(p0); verts.append(p1)
+                            elif st == "ARC":
+                                self._arcs.append(
+                                    (sub.dxf.center.x, sub.dxf.center.y,
+                                     sub.dxf.radius, sub.dxf.start_angle,
+                                     sub.dxf.end_angle))
+                                import math as _m
+                                for ang in (sub.dxf.start_angle,
+                                            sub.dxf.end_angle):
+                                    r = _m.radians(ang)
+                                    verts.append(
+                                        (sub.dxf.center.x
+                                         + sub.dxf.radius * _m.cos(r),
+                                         sub.dxf.center.y
+                                         + sub.dxf.radius * _m.sin(r)))
+                    except Exception:
+                        verts = []
+                    # De-duplicate consecutive coincident vertices, preserving
+                    # order, to recover the chain's vertex sequence.
+                    chain_v = []
+                    for v in verts:
+                        if not chain_v or _dist2(chain_v[-1], v) > 1e-10:
+                            chain_v.append(v)
+                    if len(chain_v) >= 2:
+                        self._poly_endpoints.append(chain_v[0])
+                        self._poly_endpoints.append(chain_v[-1])
+                        self._seam_points.extend(chain_v[1:-1])
         except Exception:
             self._segments, self._arcs, self._circles = [], [], []
+
         for p in points:
             self.pts_tree.insert("", "end", iid=str(p.index),
                                  values=(p.index, "%.4f" % p.x, "%.4f" % p.y))
@@ -558,6 +613,27 @@ class App:
         self.save_csv_btn.configure(state=state)
         self.sel_all_btn.configure(state=state)
         self.clear_all_btn.configure(state=state)
+        self._draw_seam_dots()
+
+    def _draw_seam_dots(self):
+        """Draw the latent parent-seam vertices of every joined child as
+        translucent, outlined blue dots -- visually distinct from the solid
+        selection dots -- so the user can see (and later Split at) the original
+        segment boundaries inside a joined polyline."""
+        for art in self._seam_dot_artists:
+            try:
+                art.remove()
+            except Exception:
+                pass
+        self._seam_dot_artists = []
+        for (x, y) in self._seam_points:
+            (dot,) = self.after_ax.plot(
+                [x], [y], marker="o", markersize=8, linestyle="None",
+                markerfacecolor=_SEAM_FILL, markeredgecolor=_SEAM_EDGE,
+                markeredgewidth=1.4, alpha=0.45, zorder=10)
+            self._seam_dot_artists.append(dot)
+        if self._seam_points:
+            self.after_canvas.draw_idle()
 
     # ---------------------------------------------------- interactive points
     # ---------------------------------------------------- after-view input
@@ -1070,6 +1146,7 @@ class App:
             self._markers = {}
             self._geom_highlights = {}
             self._row_owners = {}
+            self._seam_dot_artists = []
         ax.set_aspect("equal")
         ax.set_axis_off()
         try:
@@ -1077,6 +1154,10 @@ class App:
         except Exception as exc:
             self._set_report("Preview render failed: %s" % exc)
             return
+        if which == "after":
+            # Caches are already populated (that call ran synchronously before
+            # this scheduled render); re-draw the latent seam dots on top.
+            self._draw_seam_dots()
         canvas.draw_idle()
 
     def _render_async(self, path, which):
