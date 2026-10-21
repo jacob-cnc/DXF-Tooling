@@ -13,7 +13,12 @@ change. The only additions wrapped around it are:
 
 Guarantees preserved from the PoC:
 * geometry is only *subdivided* -- never moved, trimmed or merged;
-* arcs and circles are copied through untouched;
+* an entity is broken wherever another entity crosses its interior, so a
+  chainable endpoint exists at every intersection. Lines are split at crossings
+  with lines/arcs/circles (the original PoC); arcs are likewise split at
+  crossings with lines/arcs/circles so a fillet meeting a line gets an endpoint
+  there. A split arc's pieces sum to the original sweep.
+* circles are copied through untouched;
 * layers and units are preserved.
 """
 from __future__ import annotations
@@ -62,6 +67,35 @@ def line_circle_params(a, b, cx, cy, r):
     disc = max(disc, 0.0)
     sq = math.sqrt(disc)
     return [(-B + sq) / (2 * A), (-B - sq) / (2 * A)]
+
+
+def circle_circle_points(cx0, cy0, r0, cx1, cy1, r1):
+    """Intersection POINTS of two circles, as a list of (x, y).
+
+    Returns [] when the circles are separate, one contains the other, or they
+    are coincident (infinitely many / no discrete crossings). Tangent circles
+    return the single touch point.
+    """
+    dx, dy = cx1 - cx0, cy1 - cy0
+    d2 = dx * dx + dy * dy
+    if d2 <= 1e-18:
+        return []                      # concentric (incl. identical)
+    d = math.sqrt(d2)
+    if d > r0 + r1 + 1e-9:
+        return []                      # too far apart
+    if d < abs(r0 - r1) - 1e-9:
+        return []                      # one inside the other
+    # Distance from c0 to the radical line's foot along the center line.
+    a = (r0 * r0 - r1 * r1 + d2) / (2 * d)
+    h2 = r0 * r0 - a * a
+    h = math.sqrt(h2) if h2 > 0 else 0.0
+    # Foot of the perpendicular from the centers' line.
+    xm = cx0 + a * dx / d
+    ym = cy0 + a * dy / d
+    if h <= 1e-12:
+        return [(xm, ym)]              # tangent: one point
+    ox, oy = -dy * (h / d), dx * (h / d)
+    return [(xm + ox, ym + oy), (xm - ox, ym - oy)]
 
 
 # --------------------------------------------------------------------------
@@ -275,6 +309,7 @@ class CleanReport:
     arcs_from_splines: int = 0
     segments_dropped: int = 0
     overlaps_merged: int = 0
+    arcs_deduped: int = 0
     other_dropped: int = 0
     warnings: List[str] = field(default_factory=list)
     out_lines: List[Tuple[Tuple[float, float], Tuple[float, float], str]] = \
@@ -440,14 +475,46 @@ def clean_doc(doc, spline_to_arcs=False, arc_tol=0.005
     line_segs, line_layers, report.overlaps_merged = \
         merge_overlapping_lines(line_segs, line_layers)
 
-    new_lines, dropped = _split_lines_at_intersections(
-        line_segs, line_layers, arcs, circles)
+    # All arcs (native + spline-fitted) take part in splitting symmetrically:
+    # they cut lines, they cut each other, and they are themselves cut where
+    # anything crosses their interior. This is what breaks a fillet arc at the
+    # point it meets a line/arc so an endpoint exists there to chain/split.
+    all_arcs = list(arcs) + list(fitted_arcs)
 
-    report.segments_dropped = dropped
+    # Drop exact-duplicate arcs (CAD exports often stack a fillet arc twice).
+    # A duplicate makes the shared vertex a degree-4 FORK, which branches a
+    # perimeter chain into the part. Do this BEFORE splitting so we don't
+    # subdivide phantom copies.
+    all_arcs, report.arcs_deduped = dedupe_arcs(all_arcs)
+
+    new_lines, dropped = _split_lines_at_intersections(
+        line_segs, line_layers, all_arcs, circles)
+
+    circles_xy = [(cx, cy, r) for (cx, cy, r, _ly) in circles]
+    split_arcs, arc_dropped = _split_arcs_at_intersections(
+        all_arcs, line_segs, circles_xy)
+
+    # Splitting co-circular overlaps re-creates pieces identical to arcs that
+    # were already there (e.g. a wide arc cut at a nested arc's endpoints now
+    # matches that nested arc). Dedupe again so those junctions stay degree-2
+    # rather than becoming forks.
+    split_arcs, post_dedup = dedupe_arcs(split_arcs)
+    report.arcs_deduped += post_dedup
+
+    # Break each CIRCLE that has vertices on its ring into arc pieces at those
+    # intersections (lines + the split arcs), so each piece is independently
+    # selectable. A circle with no intersections stays whole.
+    circle_arc_pieces, kept_circles = _split_circles_at_intersections(
+        circles, line_segs, split_arcs)
+    split_arcs.extend(circle_arc_pieces)
+    split_arcs, c_dedup = dedupe_arcs(split_arcs)
+    report.arcs_deduped += c_dedup
+
+    report.segments_dropped = dropped + arc_dropped
     report.lines_out = len(new_lines)
     report.out_lines = list(new_lines)
 
-    ndoc = _build_output_doc(doc, new_lines, arcs, circles, fitted_arcs)
+    ndoc = _build_output_doc(doc, new_lines, split_arcs, kept_circles, [])
     return ndoc, report
 
 
@@ -587,6 +654,187 @@ def _split_lines_at_intersections(line_segs, line_layers, arcs, circles):
                 continue  # skip degenerate / zero-length segment
             new_lines.append((p0, p1, line_layers[i]))
     return new_lines, dropped
+
+
+def _norm_angle(deg):
+    a = deg % 360.0
+    return a + 360.0 if a < 0 else a
+
+
+def dedupe_arcs(arcs, tol=1e-4, ang_tol=1e-2):
+    """Drop exact-duplicate arcs, keeping one of each.
+
+    CAD exports frequently stack the SAME fillet arc twice (identical centre,
+    radius and sweep). A duplicate arc makes the shared vertex degree-4, which
+    the chainer sees as a FORK -- so chaining a perimeter branches into the
+    part. Two arcs are the same when they share a centre, radius and sweep
+    (either orientation: start/end swapped is the same curve). Returns
+    ``(unique_arcs, n_removed)``. Only arc-vs-arc exact matches are removed; an
+    arc that merely lies on a full circle's ring is left alone.
+    """
+    kept = []
+    removed = 0
+    for a in arcs:
+        cx, cy, r, sa, ea = a[0], a[1], a[2], a[3], a[4]
+        s, e = _norm_angle(sa), _norm_angle(ea)
+        dup = False
+        for k in kept:
+            kcx, kcy, kr, ksa, kea = k[0], k[1], k[2], k[3], k[4]
+            if (abs(cx - kcx) <= tol and abs(cy - kcy) <= tol
+                    and abs(r - kr) <= tol):
+                ks, ke = _norm_angle(ksa), _norm_angle(kea)
+                # An arc is DIRECTIONAL (CCW start->end). Two arcs on the same
+                # circle are the same only when their start AND end match --
+                # NOT when swapped: 0->180 (top half) and 180->360 (bottom
+                # half) share endpoints but are different arcs. A true stacked
+                # duplicate has identical start and end.
+                same = (abs(s - ks) <= ang_tol and abs(e - ke) <= ang_tol)
+                if same:
+                    dup = True
+                    break
+        if dup:
+            removed += 1
+        else:
+            kept.append(a)
+    return kept, removed
+
+
+def _split_arcs_at_intersections(arcs, line_segs, circles):
+    """Break each arc wherever another entity crosses its interior, the
+    symmetric counterpart of the line splitter.
+
+    ``arcs`` is a list of ``(cx, cy, r, start_deg, end_deg, layer)``. Cutters
+    are the given line segments, the OTHER arcs (as their underlying circles),
+    and the circles. An arc is subdivided at the angles of those crossings
+    that fall strictly inside its CCW sweep -- never moved or trimmed. Returns
+    a new list of ``(cx, cy, r, start_deg, end_deg, layer)`` arc pieces plus a
+    count of zero-sweep pieces dropped.
+    """
+    out = []
+    dropped = 0
+    for i, (cx, cy, r, sa, ea, ly) in enumerate(arcs):
+        sweep = (ea - sa) % 360.0
+        if sweep <= 1e-9:
+            sweep = 360.0               # full-ish arc; treat as complete sweep
+        # Collect candidate crossing POINTS on this arc's circle.
+        pts = []
+        # arc x line
+        for (a, b) in line_segs:
+            for t in line_circle_params(a, b, cx, cy, r):
+                if -1e-9 <= t <= 1 + 1e-9:   # on the (finite) line segment
+                    (ax, ay), (bx, by) = a, b
+                    pts.append((ax + t * (bx - ax), ay + t * (by - ay)))
+        # arc x other arcs
+        for j, (ox, oy, orr, osa, oea, _l) in enumerate(arcs):
+            if j == i:
+                continue
+            same_circle = (abs(ox - cx) <= 1e-4 and abs(oy - cy) <= 1e-4
+                           and abs(orr - r) <= 1e-4)
+            if same_circle:
+                # Co-circular arcs never "cross" (circle_circle_points returns
+                # nothing for a coincident circle), but a shorter arc nested in
+                # a longer one must still break the longer one at its ENDPOINTS
+                # -- otherwise the long arc runs through those junctions
+                # undivided (the fillet-overlap case). Add the other arc's two
+                # endpoints as candidate cut points.
+                for ang in (osa, oea):
+                    rad = math.radians(ang)
+                    pts.append((cx + r * math.cos(rad),
+                                cy + r * math.sin(rad)))
+                continue
+            for (px, py) in circle_circle_points(cx, cy, r, ox, oy, orr):
+                # Keep only points that also lie on the OTHER arc's sweep.
+                oang = math.degrees(math.atan2(py - oy, px - ox))
+                if ang_in(oang, osa, oea):
+                    pts.append((px, py))
+        # arc x circles (full circles cross the whole ring)
+        for (ox, oy, orr) in circles:
+            for (px, py) in circle_circle_points(cx, cy, r, ox, oy, orr):
+                pts.append((px, py))
+
+        # Convert crossing points to sweep-relative angles strictly interior.
+        rels = []
+        for (px, py) in pts:
+            ang = math.degrees(math.atan2(py - cy, px - cx))
+            rel = (ang - sa) % 360.0
+            if TOL * 360.0 < rel < sweep - TOL * 360.0:
+                rels.append(rel)
+        rels.sort()
+        # Dedupe near-equal angles (coincident crossings -> one break).
+        deduped = []
+        for rel in rels:
+            if not deduped or (rel - deduped[-1]) > 1e-4:
+                deduped.append(rel)
+        bounds = [0.0] + deduped + [sweep]
+        for k in range(len(bounds) - 1):
+            w = bounds[k + 1] - bounds[k]
+            if w <= 1e-6:
+                dropped += 1
+                continue
+            out.append((cx, cy, r, _norm_angle(sa + bounds[k]),
+                        _norm_angle(sa + bounds[k + 1]), ly))
+    return out, dropped
+
+
+def _split_circles_at_intersections(circles, line_segs, arcs):
+    """Break each full CIRCLE into ARC pieces at the points where other
+    geometry crosses its ring, so each piece is independently selectable /
+    chainable. A circle with NO intersections is left whole (returned in the
+    ``kept_circles`` list) -- we only subdivide circles that actually have
+    vertices on them, never blindly quarter every circle.
+
+    ``circles`` is ``[(cx, cy, r, layer), ...]``; cutters are the line
+    segments and the arcs. Returns ``(arc_pieces, kept_circles)`` where
+    ``arc_pieces`` is ``[(cx, cy, r, start_deg, end_deg, layer), ...]`` and
+    ``kept_circles`` keeps the ``(cx, cy, r, layer)`` shape.
+    """
+    arc_pieces = []
+    kept_circles = []
+    for (cx, cy, r, ly) in circles:
+        angs = []
+        # circle x lines
+        for (a, b) in line_segs:
+            for t in line_circle_params(a, b, cx, cy, r):
+                if -1e-9 <= t <= 1 + 1e-9:
+                    (ax, ay), (bx, by) = a, b
+                    px, py = ax + t * (bx - ax), ay + t * (by - ay)
+                    angs.append(math.degrees(math.atan2(py - cy, px - cx)))
+        # circle x arcs (only where the point is on the arc's sweep)
+        for (ox, oy, orr, osa, oea, _l) in arcs:
+            for (px, py) in circle_circle_points(cx, cy, r, ox, oy, orr):
+                oang = math.degrees(math.atan2(py - oy, px - ox))
+                if ang_in(oang, osa, oea):
+                    angs.append(math.degrees(math.atan2(py - cy, px - cx)))
+        # circle x other circles
+        for (ox, oy, orr, _l) in circles:
+            if abs(ox - cx) <= 1e-4 and abs(oy - cy) <= 1e-4 \
+                    and abs(orr - r) <= 1e-4:
+                continue
+            for (px, py) in circle_circle_points(cx, cy, r, ox, oy, orr):
+                angs.append(math.degrees(math.atan2(py - cy, px - cx)))
+
+        # Normalise, sort and dedupe the cut angles.
+        norm = sorted(_norm_angle(a) for a in angs)
+        cuts = []
+        for a in norm:
+            if not cuts or (a - cuts[-1]) > 1e-3:
+                cuts.append(a)
+        # Merge an angle near 360 back onto the 0 cut (same point).
+        if cuts and (360.0 - cuts[-1]) < 1e-3:
+            cuts.pop()
+
+        if not cuts:
+            kept_circles.append((cx, cy, r, ly))   # no vertices -> stay a circle
+            continue
+        # Build CCW arc pieces between consecutive cut angles, wrapping around.
+        ring = cuts + [cuts[0] + 360.0]
+        for k in range(len(ring) - 1):
+            sa = _norm_angle(ring[k])
+            ea = _norm_angle(ring[k + 1])
+            if ((ea - sa) % 360.0) <= 1e-6:
+                continue
+            arc_pieces.append((cx, cy, r, sa, ea, ly))
+    return arc_pieces, kept_circles
 
 
 def _build_output_doc(doc, new_lines, arcs, circles, fitted_arcs):
