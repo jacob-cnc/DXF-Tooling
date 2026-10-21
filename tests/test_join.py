@@ -66,6 +66,46 @@ def test_three_segment_chain():
     assert len(chain) == 4
 
 
+def test_interior_first_segment_orders():
+    """Repro of the reported Join bug: the chain's FIRST selected item sits in
+    the MIDDLE of the path. The old forward-only walk grew only from item 0's
+    tail and never matched the neighbour on item 0's start side, so it wrongly
+    reported 'not a single connected chain'. Both-ends growth must handle it."""
+    # Path A-B-C-D given with the middle piece (B-C) first.
+    middle = ("line", (10, 0), (20, 0))
+    left = ("line", (0, 0), (10, 0))
+    right = ("line", (20, 0), (30, 0))
+    chain = order_chain([middle, left, right])
+    assert chain is not None, "interior-first selection wrongly rejected"
+    assert len(chain) == 4
+    xs = [round(v[0][0], 4) for v in chain]
+    assert xs == [0, 10, 20, 30] or xs == [30, 20, 10, 0], \
+        "chain not ordered end-to-end: %r" % xs
+
+
+def test_two_collinear_verticals_sharing_midpoint():
+    """The exact second-screenshot case: two vertical segments meeting at a
+    shared midpoint, given middle-out / reversed. Must join."""
+    top = ("line", (50.0, 6.0371), (50.0, 0.0))
+    bottom = ("line", (50.0, 0.0), (50.0, -50.0))
+    assert order_chain([top, bottom]) is not None
+    # reversed orientations too
+    assert order_chain([("line", (50.0, 0.0), (50.0, 6.0371)),
+                        ("line", (50.0, -50.0), (50.0, 0.0))]) is not None
+
+
+def test_small_fit_gap_within_tolerance_joins():
+    """Biarc-fitted endpoints differ by ~1e-3; such a seam must still join
+    (the old 1e-4 tolerance rejected it)."""
+    a = ("line", (0.0, 0.0), (10.0, 0.0))
+    b = ("line", (10.0008, 0.0), (20.0, 0.0))   # 8e-4 seam gap
+    assert order_chain([a, b]) is not None, \
+        "a sub-millimetre fit seam should join"
+    # but a genuine gap is still rejected
+    c = ("line", (10.05, 0.0), (20.0, 0.0))     # 0.05 gap
+    assert order_chain([a, c]) is None
+
+
 def run():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
