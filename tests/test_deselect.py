@@ -137,8 +137,55 @@ def test_shared_endpoint_survives_partial_deselect():
         root.destroy()
 
 
+def test_window_gesture_fires_when_release_is_outside_axis():
+    """Repro of the ~50% miss: a window-drag whose mouse-up lands OUTSIDE the
+    axis (event.inaxes is None, no data coords) must still fire the gesture,
+    using the last in-axis drag point. Drives the real press/motion/release
+    handlers end to end."""
+    app, root = _make_app()
+    if app is None:
+        import pytest; pytest.skip("no Tk display")
+    try:
+        xmin, ymin, xmax, ymax = _bbox(app)
+        ax = app.after_ax
+        # Press inside, drag inside, then RELEASE with no coords (outside axis).
+        app._on_after_press(_ev(xmin, ymin, ax))
+        app._on_after_motion(_ev(xmax, ymax, ax))      # last in-axis point
+        release = SimpleNamespace(inaxes=None, xdata=None, ydata=None, key=None)
+        app._on_after_release(release)
+        assert len(app._sel_entities) > 0, \
+            "window select dropped because release landed outside the axis"
+    finally:
+        root.destroy()
+
+
+def test_ctrl_window_fires_when_release_is_outside_axis():
+    """Same repro for the deselect window: select all, then Ctrl-window-drag
+    that releases outside the axis must still clear the selection."""
+    app, root = _make_app()
+    if app is None:
+        import pytest; pytest.skip("no Tk display")
+    try:
+        xmin, ymin, xmax, ymax = _bbox(app)
+        ax = app.after_ax
+        app._window_select(xmin, ymin, xmax, ymax, deselect=False)
+        assert len(app._sel_entities) > 0
+        # Ctrl-drag, releasing outside the axis.
+        app._on_after_press(_ev(xmin, ymin, ax, ctrl=True))
+        app._on_after_motion(_ev(xmax, ymax, ax, ctrl=True))
+        release = SimpleNamespace(inaxes=None, xdata=None, ydata=None,
+                                  key="control")
+        app._on_after_release(release)
+        assert len(app._sel_entities) == 0, \
+            "Ctrl-window deselect dropped on release outside the axis"
+    finally:
+        root.destroy()
+
+
 if __name__ == "__main__":
     test_ctrl_window_deselects_everything()
     test_ctrl_click_removes_one_entity()
     test_shared_endpoint_survives_partial_deselect()
+    test_window_gesture_fires_when_release_is_outside_axis()
+    test_ctrl_window_fires_when_release_is_outside_axis()
     print("deselect smoke: OK")

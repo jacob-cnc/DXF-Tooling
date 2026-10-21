@@ -115,6 +115,7 @@ class App:
         self._row_owners = {}
         self._rubber = None         # rubber-band rectangle artist
         self._drag_start = None     # window-select drag anchor (data coords)
+        self._drag_last = None      # last in-axis drag point (data coords)
         self._drag_deselect = False # True while a Ctrl-drag is in progress
 
         self._build_ui()
@@ -463,6 +464,7 @@ class App:
         if event.inaxes is not self.after_ax or event.xdata is None:
             return
         self._drag_start = (event.xdata, event.ydata)
+        self._drag_last = (event.xdata, event.ydata)
         # Latch the mode for the whole gesture: Ctrl = deselect, else select.
         self._drag_deselect = self._is_ctrl(event)
 
@@ -472,6 +474,7 @@ class App:
             return
         x0, y0 = self._drag_start
         x1, y1 = event.xdata, event.ydata
+        self._drag_last = (x1, y1)   # remember for a release outside the axis
         if self._rubber is not None:
             try:
                 self._rubber.remove()
@@ -488,8 +491,10 @@ class App:
 
     def _on_after_release(self, event):
         start = self._drag_start
+        last = self._drag_last
         deselect = self._drag_deselect
         self._drag_start = None
+        self._drag_last = None
         self._drag_deselect = False
         if self._rubber is not None:
             try:
@@ -500,15 +505,24 @@ class App:
             self.after_canvas.draw_idle()
         if getattr(self.after_toolbar, "mode", ""):
             return
-        if start is None or event.inaxes is not self.after_ax \
-                or event.xdata is None:
+        if start is None:
+            return
+        # The release may land OUTSIDE the axis (common when boxing around the
+        # whole drawing): matplotlib then gives no data coords. Fall back to the
+        # last in-axis drag point so the window gesture still fires.
+        if event.xdata is not None and event.inaxes is self.after_ax:
+            x1, y1 = event.xdata, event.ydata
+        elif last is not None:
+            x1, y1 = last
+        else:
             return
         x0, y0 = start
-        x1, y1 = event.xdata, event.ydata
-        # Treat tiny drags as a click (single pick / single unpick).
+        # Treat tiny drags as a click (single pick / single unpick). A click
+        # must have real release coords on the axis to hit-test the point.
         if abs(x1 - x0) < self._pick_tolerance(4) and \
                 abs(y1 - y0) < self._pick_tolerance(4):
-            self._on_segment_click(event, deselect=deselect)
+            if event.xdata is not None and event.inaxes is self.after_ax:
+                self._on_segment_click(event, deselect=deselect)
             return
         # Window gesture: everything fully inside the rectangle.
         self._window_select(min(x0, x1), min(y0, y1),
