@@ -213,6 +213,14 @@ class App:
                                       self._on_after_motion)
         self.after_canvas.mpl_connect("button_release_event",
                                       self._on_after_release)
+        # Tk-level release backstop. matplotlib's button_release_event is NOT
+        # delivered when the mouse-up lands on the toolbar widget or past the
+        # canvas (which is why a top-to-bottom drag -- releasing toward the
+        # bottom toolbar -- missed far more often than bottom-to-top). Tk holds
+        # an implicit pointer grab from the press, so this fires regardless of
+        # where the button is released and finalizes any in-progress drag.
+        self.after_canvas.get_tk_widget().bind(
+            "<ButtonRelease-1>", self._on_after_release_tk, add="+")
 
         # Report
         bottom = ttk.LabelFrame(self.root, text="Report", padding=4)
@@ -490,9 +498,40 @@ class App:
         self.after_canvas.draw_idle()
 
     def _on_after_release(self, event):
+        """matplotlib release: finalize the drag using the event's data coords
+        when it lands on the axis, else the last tracked in-axis point."""
+        if self._drag_start is None:
+            return
+        if event is not None and event.xdata is not None \
+                and event.inaxes is self.after_ax:
+            self._finish_drag(event.xdata, event.ydata, click_event=event)
+        else:
+            self._finish_drag(None, None, click_event=None)
+
+    def _on_after_release_tk(self, _tk_event):
+        """Tk-level backstop: if the matplotlib release never arrived (mouse-up
+        over the toolbar or past the canvas), finalize the still-open drag with
+        the last in-axis point. Deferred to idle so the matplotlib release --
+        dispatched from the same Tk event -- gets first chance; this then
+        no-ops because _drag_start is already cleared. Only a genuinely lost
+        matplotlib release leaves the drag open for this to complete."""
+        def _backstop():
+            if self._drag_start is None:
+                return   # matplotlib release already handled it
+            self._finish_drag(None, None, click_event=None)
+        try:
+            self.root.after_idle(_backstop)
+        except Exception:
+            _backstop()
+
+    def _finish_drag(self, rel_x, rel_y, click_event=None):
+        """Complete a press..release gesture exactly once. ``rel_x``/``rel_y``
+        are the release data coords when available, else None (fall back to the
+        last in-axis drag point)."""
         start = self._drag_start
         last = self._drag_last
         deselect = self._drag_deselect
+        # Clear state up front so the two release paths can't double-fire.
         self._drag_start = None
         self._drag_last = None
         self._drag_deselect = False
@@ -507,22 +546,19 @@ class App:
             return
         if start is None:
             return
-        # The release may land OUTSIDE the axis (common when boxing around the
-        # whole drawing): matplotlib then gives no data coords. Fall back to the
-        # last in-axis drag point so the window gesture still fires.
-        if event.xdata is not None and event.inaxes is self.after_ax:
-            x1, y1 = event.xdata, event.ydata
+        if rel_x is not None:
+            x1, y1 = rel_x, rel_y
         elif last is not None:
             x1, y1 = last
         else:
             return
         x0, y0 = start
         # Treat tiny drags as a click (single pick / single unpick). A click
-        # must have real release coords on the axis to hit-test the point.
+        # needs real on-axis release coords to hit-test the point.
         if abs(x1 - x0) < self._pick_tolerance(4) and \
                 abs(y1 - y0) < self._pick_tolerance(4):
-            if event.xdata is not None and event.inaxes is self.after_ax:
-                self._on_segment_click(event, deselect=deselect)
+            if click_event is not None:
+                self._on_segment_click(click_event, deselect=deselect)
             return
         # Window gesture: everything fully inside the rectangle.
         self._window_select(min(x0, x1), min(y0, y1),

@@ -182,10 +182,58 @@ def test_ctrl_window_fires_when_release_is_outside_axis():
         root.destroy()
 
 
+def test_tk_backstop_fires_when_mpl_release_is_lost():
+    """The direction-dependent miss: the matplotlib button_release_event is
+    NOT delivered when the mouse-up lands on the bottom toolbar (top-to-bottom
+    drags released there). Simulate that by firing ONLY the Tk backstop (no
+    matplotlib release at all) and assert the window gesture still completes."""
+    app, root = _make_app()
+    if app is None:
+        import pytest; pytest.skip("no Tk display")
+    try:
+        xmin, ymin, xmax, ymax = _bbox(app)
+        ax = app.after_ax
+        app._on_after_press(_ev(xmin, ymin, ax))
+        app._on_after_motion(_ev(xmax, ymax, ax))
+        # matplotlib release is LOST -> only the Tk backstop runs. Call its
+        # finalizer synchronously (production defers it via after_idle).
+        assert app._drag_start is not None, "drag should still be open"
+        app._finish_drag(None, None, click_event=None)
+        assert len(app._sel_entities) > 0, \
+            "Tk backstop failed to finalize a drag whose mpl release was lost"
+    finally:
+        root.destroy()
+
+
+def test_no_double_fire_between_release_paths():
+    """When the matplotlib release finalizes a drag, the deferred Tk backstop
+    must be a no-op (it checks _drag_start, which is already cleared)."""
+    app, root = _make_app()
+    if app is None:
+        import pytest; pytest.skip("no Tk display")
+    try:
+        xmin, ymin, xmax, ymax = _bbox(app)
+        ax = app.after_ax
+        app._on_after_press(_ev(xmin, ymin, ax))
+        app._on_after_motion(_ev(xmax, ymax, ax))
+        app._on_after_release(_ev(xmax, ymax, ax))     # mpl release finalizes
+        n = len(app._sel_entities)
+        assert n > 0
+        assert app._drag_start is None, "state should be cleared after release"
+        # Backstop now would no-op (drag already closed) -> no change.
+        app._on_after_release(SimpleNamespace(inaxes=None, xdata=None,
+                                              ydata=None, key=None))
+        assert len(app._sel_entities) == n, "second release path double-fired"
+    finally:
+        root.destroy()
+
+
 if __name__ == "__main__":
     test_ctrl_window_deselects_everything()
     test_ctrl_click_removes_one_entity()
     test_shared_endpoint_survives_partial_deselect()
     test_window_gesture_fires_when_release_is_outside_axis()
     test_ctrl_window_fires_when_release_is_outside_axis()
+    test_tk_backstop_fires_when_mpl_release_is_lost()
+    test_no_double_fire_between_release_paths()
     print("deselect smoke: OK")
