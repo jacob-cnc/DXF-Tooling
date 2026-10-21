@@ -82,7 +82,10 @@ def test_end_to_end_emits_arcs():
     splines_out = [e for e in ndoc.modelspace() if e.dxftype() == "SPLINE"]
     assert len(arcs) >= 4, "expected arcs in output, got %d" % len(arcs)
     assert not splines_out, "no SPLINE should remain in cleaned output"
-    assert report.arcs_from_splines == len(arcs)
+    # Fitted arcs may be SUBDIVIDED where they cross another entity (so an
+    # endpoint exists at the intersection), so the output arc count is at
+    # least the number of arcs fitted from splines, never fewer.
+    assert len(arcs) >= report.arcs_from_splines
     assert report.splines_converted == 4
 
 

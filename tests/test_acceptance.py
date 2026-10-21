@@ -214,8 +214,32 @@ def run():
             "  %d <-> %d (shared %.4f)" % (i, j, s) for i, j, s in overlaps)
     print("collinear overlapping segment pairs:", len(overlaps))
 
-    # 2) arcs + circle pass through untouched (count equals input)
-    assert len(out_arcs) == len(in_arcs), "arcs must be unchanged"
+    # 2) arcs may now be SUBDIVIDED at interior intersections (so an endpoint
+    #    exists wherever another entity crosses an arc -- the chaining fix),
+    #    but geometry is only subdivided, never lost: the piece count never
+    #    drops below the input, and the total swept angle is preserved.
+    assert len(out_arcs) >= len(in_arcs), \
+        "arcs must not be dropped (only subdivided)"
+
+    def _swept(arcs):
+        tot = 0.0
+        for (cx, cy, r, sa, ea) in arcs:
+            tot += ((ea - sa) % 360.0) or 360.0
+        return tot
+    # Group by circle (cx,cy,r) so split pieces of one arc still sum to its
+    # original sweep.
+    def _by_circle(arcs):
+        d = {}
+        for (cx, cy, r, sa, ea) in arcs:
+            key = (round(cx, 4), round(cy, 4), round(r, 4))
+            d[key] = d.get(key, 0.0) + (((ea - sa) % 360.0) or 360.0)
+        return d
+    in_sweep, out_sweep = _by_circle(in_arcs), _by_circle(out_arcs)
+    assert set(in_sweep) == set(out_sweep), "arc circles changed"
+    for key in in_sweep:
+        assert abs(in_sweep[key] - out_sweep[key]) < 1e-3, \
+            "total swept angle changed for arc %r (%.4f -> %.4f)" % (
+                key, in_sweep[key], out_sweep[key])
     assert len(out_circles) == len(in_circles), "circles must be unchanged"
 
     # 3) zero zero-length segments
