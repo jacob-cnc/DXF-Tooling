@@ -1,0 +1,52 @@
+===========================================================
+  DXF Cleanup  --  READ ME FIRST
+===========================================================
+
+WHAT THIS IS
+------------
+A small Windows tool that cleans up a DXF drawing so it chains
+cleanly on the ProtoTRAK DPM RMX control. It removes splines and
+breaks every line where another line crosses it.
+
+There is NOTHING to install. No Python, no admin rights, no
+internet. It is one self-contained program file.
+
+
+HOW TO USE IT  (3 steps)
+------------------------
+1. Double-click  DXFCleanup.exe  (in this same folder).
+
+   - The FIRST launch takes a few seconds while it unpacks. Normal.
+
+   - Windows may show a blue box: "Windows protected your PC".
+     This is only because the tool is made in-house, not by a big
+     software company. It is safe.
+        Click  "More info"  ->  "Run anyway".
+     You only do this ONCE on each computer.
+
+2. In the tool: click "Choose DXF..." and pick your drawing.
+   You will see a Before preview.
+
+3. Click "Clean + Save". It writes a NEW file named
+   <yourdrawing>_clean.dxf next to the original (your original is
+   never changed). Load that _clean.dxf onto the mill.
+
+
+IF SOMETHING LOOKS WRONG
+------------------------
+- "It won't open / it's slow the first time."
+      Only the first launch is slow (it's unpacking once). Wait a
+      few seconds; after that it opens quickly.
+
+- "Antivirus flagged it."
+      In-house single-file tools are sometimes flagged by mistake.
+      It is a false alarm. Allow it, or ask IT to allow this one
+      file.
+
+- "My computer blocks unsigned programs entirely."
+      Ask IT to allow DXFCleanup.exe. It is an internal tool.
+
+
+QUESTIONS
+---------
+Ask the person who sent you this file.
