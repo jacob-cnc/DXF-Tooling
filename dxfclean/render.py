@@ -51,13 +51,39 @@ def draw_dxf(ax, src: str) -> list:
                                 theta2=e.dxf.end_angle,
                                 edgecolor=COLOR, lw=LW))
         elif t in ("LWPOLYLINE", "POLYLINE"):
-            pts = [(p[0], p[1]) for p in e.get_points("xy")] \
-                if t == "LWPOLYLINE" \
-                else [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
-            if getattr(e, "closed", False) or getattr(e.dxf, "flags", 0) & 1:
-                pts = pts + pts[:1]
-            xs, ys = zip(*pts)
-            ax.plot(xs, ys, color=COLOR, lw=LW, solid_capstyle="round")
+            # Honor arc BULGES: expand the polyline into its real LINE/ARC
+            # sub-entities so a joined arc-chain renders as the smooth curve it
+            # is, not faceted chords. virtual_entities() applies the bulges.
+            expanded = False
+            try:
+                for sub in e.virtual_entities():
+                    st = sub.dxftype()
+                    if st == "ARC":
+                        c = sub.dxf.center
+                        dia = sub.dxf.radius * 2
+                        ax.add_patch(MplArc((c.x, c.y), dia, dia, angle=0,
+                                            theta1=sub.dxf.start_angle,
+                                            theta2=sub.dxf.end_angle,
+                                            edgecolor=COLOR, lw=LW))
+                        expanded = True
+                    elif st == "LINE":
+                        s, en = sub.dxf.start, sub.dxf.end
+                        ax.plot([s.x, en.x], [s.y, en.y], color=COLOR, lw=LW,
+                                solid_capstyle="round")
+                        expanded = True
+            except Exception:
+                expanded = False
+            if not expanded:
+                pts = [(p[0], p[1]) for p in e.get_points("xy")] \
+                    if t == "LWPOLYLINE" \
+                    else [(v.dxf.location.x, v.dxf.location.y)
+                          for v in e.vertices]
+                if getattr(e, "closed", False) or getattr(e.dxf, "flags", 0) & 1:
+                    pts = pts + pts[:1]
+                if len(pts) >= 2:
+                    xs, ys = zip(*pts)
+                    ax.plot(xs, ys, color=COLOR, lw=LW,
+                            solid_capstyle="round")
         elif t == "SPLINE":
             # Display-only: flatten the spline to a polyline so it is VISIBLE
             # in the preview. This does NOT change the DXF -- cleanup still
