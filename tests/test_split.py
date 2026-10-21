@@ -54,10 +54,10 @@ def test_split_divides_child_and_promotes_seam_to_endpoint():
             a._select_geom(("arc",) + tuple(ar), [])
         a.join_selected(); root.update()
         assert len(a._polylines) == 1
-        assert len(a._seam_points) >= 3
+        assert len(a._seams) >= 3
 
-        mid = len(a._seam_points) // 2
-        seam_pt = a._seam_points[mid]
+        mid = len(a._seams) // 2
+        seam_pt = a._seams[mid].point
         a._arm_split(mid)
         assert a._pending_split is not None
         assert str(a.split_btn["state"]) == "normal"
@@ -71,7 +71,7 @@ def test_split_divides_child_and_promotes_seam_to_endpoint():
         seg_eps = [p for seg in a._segments for p in seg]
         assert _near(seam_pt, a._poly_endpoints) or _near(seam_pt, seg_eps), \
             "cut seam should become a solid endpoint"
-        assert not _near(seam_pt, a._seam_points), \
+        assert not _near(seam_pt, [s.point for s in a._seams]), \
             "cut seam should no longer be a translucent seam dot"
         # Split button disarmed after use.
         assert a._pending_split is None
