@@ -189,6 +189,8 @@ class App:
         self._join_parents = []
         self._polylines = []         # joined children as single selectable units
         self._seam_points = []       # interior parent-seam coords (latent dots)
+        self._seam_owner = []        # parallel: (poly_index, vertex_index)
+        self._pending_split = None   # (poly_index, vertex_index) armed for Split
         self._poly_endpoints = []    # joined-chain endpoint coords
         self._seam_dot_artists = []  # latent-dot artists (cleared on redraw)
 
@@ -235,6 +237,10 @@ class App:
                                     command=self.join_selected,
                                     state="disabled")
         self.join_btn.pack(side="right", padx=(0, 6))
+        self.split_btn = ttk.Button(top, text="Split at point",
+                                     command=self.split_at_seam,
+                                     state="disabled")
+        self.split_btn.pack(side="right", padx=(0, 6))
         self.clean_btn = ttk.Button(top, text="Clean",
                                     command=self.clean, state="disabled")
         self.clean_btn.pack(side="right", padx=(0, 6))
@@ -538,6 +544,123 @@ class App:
                 return True
         return False
 
+    # ----------------------------------------------------------- split
+    def _arm_split(self, seam_k):
+        """Arm a split at seam index ``seam_k`` (into _seam_points/_seam_owner):
+        mark that dot as the pending cut point and enable the Split button."""
+        if seam_k >= len(self._seam_owner):
+            return
+        self._pending_split = self._seam_owner[seam_k]   # (poly_i, vertex_i)
+        pt = self._seam_points[seam_k]
+        # Redraw dots, then overlay a solid marker on the armed seam so the
+        # user sees exactly where the cut will happen.
+        self._draw_seam_dots()
+        (m,) = self.after_ax.plot(
+            [pt[0]], [pt[1]], marker="o", markersize=11, linestyle="None",
+            markerfacecolor=_DESELECT_COLOR, markeredgecolor="#000000",
+            markeredgewidth=1.2, zorder=13)
+        self._seam_dot_artists.append(m)
+        self.after_canvas.draw_idle()
+        if self.split_btn is not None:
+            self.split_btn.configure(state="normal")
+        self._set_report("Split point armed. Click 'Split at point' to cut the "
+                         "chain here, or click elsewhere to cancel.")
+
+    def _clear_pending_split(self):
+        self._pending_split = None
+        if self.split_btn is not None:
+            self.split_btn.configure(state="disabled")
+        self._draw_seam_dots()
+
+    def split_at_seam(self):
+        """Cut the armed joined child at the armed seam vertex into two pieces.
+        The seam vertex becomes a solid ENDPOINT of both resulting pieces; a
+        side with a single parent segment becomes a plain LINE/ARC again (no
+        seam dots), a side with >=2 becomes a shorter LWPOLYLINE. All dot
+        states are re-derived from the new geometry on refresh."""
+        if self._pending_split is None or self._cleaned_doc is None:
+            return
+        pi, vi = self._pending_split
+        if pi >= len(self._polylines):
+            self._clear_pending_split()
+            return
+        poly = self._polylines[pi]
+        subs, verts = poly["subs"], poly["verts"]
+        if vi <= 0 or vi >= len(verts) - 1:
+            self._clear_pending_split()
+            return
+        left_subs = subs[:vi]     # sub j spans verts[j]->verts[j+1]
+        right_subs = subs[vi:]
+        msp = self._cleaned_doc.modelspace()
+        layer = "0"
+        # Delete the original polyline entity.
+        for e in list(msp):
+            if e.dxftype() in ("LWPOLYLINE", "POLYLINE") \
+                    and self._polyline_matches(e, [verts]):
+                try:
+                    layer = e.dxf.layer
+                except Exception:
+                    pass
+                try:
+                    msp.delete_entity(e)
+                except Exception:
+                    pass
+                break
+        # Emit each side.
+        for side in (left_subs, right_subs):
+            self._emit_subs(msp, side, layer)
+        self._pending_split = None
+        if self.split_btn is not None:
+            self.split_btn.configure(state="disabled")
+        self.clear_all_points()
+        self._refresh_after()
+        self._set_report("Split the chain into two at the selected point.\n"
+                         "(Not saved yet -- use Save As...)")
+
+    def _emit_subs(self, msp, subs, layer):
+        """Emit a list of sub-geoms as a single LWPOLYLINE (>=2 subs) or as a
+        plain LINE/ARC (exactly 1 sub -- no longer a chain)."""
+        import math as _m
+        if not subs:
+            return
+        attribs = {"layer": layer}
+        if len(subs) == 1:
+            s = subs[0]
+            if s[0] == "line":
+                _, p0, p1 = s
+                msp.add_line(p0, p1, dxfattribs=attribs)
+            else:
+                _, cx, cy, r, sa, ea = s
+                msp.add_arc((cx, cy), r, sa, ea, dxfattribs=attribs)
+            return
+        # Rebuild the (x, y, bulge) vertex list for the sub-chain.
+        pts = []
+        for j, s in enumerate(subs):
+            if s[0] == "line":
+                _, p0, p1 = s
+                a, b = p0, p1
+                bulge = 0.0
+            else:
+                _, cx, cy, r, sa, ea = s
+                a = (cx + r * _m.cos(_m.radians(sa)),
+                     cy + r * _m.sin(_m.radians(sa)))
+                b = (cx + r * _m.cos(_m.radians(ea)),
+                     cy + r * _m.sin(_m.radians(ea)))
+                sweep = (ea - sa) % 360.0
+                bulge = _m.tan(_m.radians(sweep) / 4.0)
+            # Orient so the chain is continuous: first sub sets direction.
+            if pts and _dist2((pts[-1][0], pts[-1][1]), a) > 1e-10 \
+                    and _dist2((pts[-1][0], pts[-1][1]), b) <= 1e-10:
+                a, b = b, a
+                bulge = -bulge
+            if not pts:
+                pts.append([a[0], a[1], 0.0, 0.0, bulge])
+            else:
+                pts[-1][4] = bulge
+            pts.append([b[0], b[1], 0.0, 0.0, 0.0])
+        msp.add_lwpolyline([tuple(p) for p in pts], format="xyseb",
+                           dxfattribs=attribs)
+
     def _entity_matches_any(self, e, geoms) -> bool:
         """True if a live cleaned entity corresponds to one of ``geoms``."""
         t = e.dxftype()
@@ -609,7 +732,11 @@ class App:
         # two chain endpoints get the solid dot.
         self._polylines = []         # [{"subs":[("line"|"arc",...)], "verts":[...]}]
         self._seam_points = []       # [(x, y), ...] interior parent seams
+        self._seam_owner = []        # parallel (poly_index, vertex_index)
         self._poly_endpoints = []    # [(x, y), ...] joined-chain endpoints
+        self._pending_split = None   # a rebuild clears any armed split
+        if getattr(self, "split_btn", None) is not None:
+            self.split_btn.configure(state="disabled")
         try:
             cdoc = ezdxf.readfile(dxf_path)
             for e in cdoc.modelspace():
@@ -659,11 +786,14 @@ class App:
                         if not chain_v or _dist2(chain_v[-1], v) > 1e-10:
                             chain_v.append(v)
                     if len(chain_v) >= 2 and subs:
+                        pi = len(self._polylines)
                         self._polylines.append({"subs": subs,
                                                 "verts": chain_v})
                         self._poly_endpoints.append(chain_v[0])
                         self._poly_endpoints.append(chain_v[-1])
-                        self._seam_points.extend(chain_v[1:-1])
+                        for vi in range(1, len(chain_v) - 1):
+                            self._seam_points.append(chain_v[vi])
+                            self._seam_owner.append((pi, vi))
         except Exception:
             self._segments, self._arcs, self._circles = [], [], []
             self._polylines = []
@@ -985,6 +1115,22 @@ class App:
             return
         cx, cy = event.xdata, event.ydata
         tol = self._pick_tolerance(8)
+
+        # Seam dots first: clicking a translucent parent-seam dot ARMS a split
+        # at that vertex (it does not select the child). Ctrl-click clears it.
+        if self._seam_points:
+            stol = self._pick_tolerance(10)
+            sbest = None
+            for k, (sx, sy) in enumerate(self._seam_points):
+                d = math.hypot(cx - sx, cy - sy)
+                if sbest is None or d < sbest[0]:
+                    sbest = (d, k)
+            if sbest is not None and sbest[0] <= stol:
+                if deselect:
+                    self._clear_pending_split()
+                else:
+                    self._arm_split(sbest[1])
+                return
 
         best_d = None
         best_targets = None   # list of (x, y) coords whose rows to mark
