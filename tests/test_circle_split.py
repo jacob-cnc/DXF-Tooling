@@ -66,8 +66,32 @@ def test_circle_with_one_crossing_line_splits_into_halves():
     print("PASS test_circle_with_one_crossing_line_splits_into_halves")
 
 
+def test_circle_with_cocircular_half_arcs_splits_clean():
+    # Regression: a circle that ALSO has co-circular half-arcs stacked on it
+    # (an over-defined CAD export) plus two diameter lines must still split
+    # into exactly four clean 90-degree quadrants -- not an extra overlapping
+    # half-arc piece (which caused intermittent select / ctrl-click-deselect
+    # failures on one bolt circle of the hex-tool part).
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    msp.add_circle((0, 0), 5.0)
+    msp.add_arc((0, 0), 5.0, start_angle=0, end_angle=180)    # co-circular halves
+    msp.add_arc((0, 0), 5.0, start_angle=180, end_angle=0)
+    msp.add_line((-8, 0), (8, 0))
+    msp.add_line((0, -8), (0, 8))
+    nd, _ = clean_doc(doc)
+    arcs = sorted((round(e.dxf.start_angle, 2), round(e.dxf.end_angle, 2))
+                  for e in nd.modelspace() if e.dxftype() == "ARC"
+                  and abs(e.dxf.radius - 5.0) < 1e-3)
+    assert nd.modelspace().query("CIRCLE").__len__() == 0
+    assert arcs == [(0.0, 90.0), (90.0, 180.0), (180.0, 270.0), (270.0, 0.0)], \
+        "expected 4 clean quadrants, got %r" % arcs
+    print("PASS test_circle_with_cocircular_half_arcs_splits_clean")
+
+
 if __name__ == "__main__":
     test_isolated_circle_stays_whole()
     test_circle_with_two_crossing_lines_splits_into_quadrants()
     test_circle_with_one_crossing_line_splits_into_halves()
+    test_circle_with_cocircular_half_arcs_splits_clean()
     print("\nALL CIRCLE-SPLIT TESTS PASSED")

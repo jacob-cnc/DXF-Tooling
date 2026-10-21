@@ -799,8 +799,16 @@ def _split_circles_at_intersections(circles, line_segs, arcs):
                     (ax, ay), (bx, by) = a, b
                     px, py = ax + t * (bx - ax), ay + t * (by - ay)
                     angs.append(math.degrees(math.atan2(py - cy, px - cx)))
-        # circle x arcs (only where the point is on the arc's sweep)
+        # circle x arcs. A co-circular arc (same centre+radius) never "crosses"
+        # this ring, but its ENDPOINTS are real vertices on it, so the circle
+        # must be cut there (same as the arc splitter's co-circular case).
+        # A non-co-circular arc contributes its genuine crossing points.
         for (ox, oy, orr, osa, oea, _l) in arcs:
+            if abs(ox - cx) <= 1e-4 and abs(oy - cy) <= 1e-4 \
+                    and abs(orr - r) <= 1e-4:
+                for ang in (osa, oea):
+                    angs.append(ang)
+                continue
             for (px, py) in circle_circle_points(cx, cy, r, ox, oy, orr):
                 oang = math.degrees(math.atan2(py - oy, px - ox))
                 if ang_in(oang, osa, oea):
