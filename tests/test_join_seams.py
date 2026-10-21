@@ -87,14 +87,27 @@ def test_clicking_joined_child_selects_whole_polyline():
         a.join_selected(); root.update()
         assert len(a._polylines) == 1
         a.clear_all_points()
-        sub = a._polylines[0]["subs"][1]
-        if sub[0] == "arc":
-            _, cx, cy, r, sa, ea = sub
-            m = math.radians((sa + ea) / 2.0)
-            px, py = cx + r * math.cos(m), cy + r * math.sin(m)
-        else:
-            px = (sub[1][0] + sub[2][0]) / 2.0
-            py = (sub[1][1] + sub[2][1]) / 2.0
+
+        # Click the chain BODY, choosing the sub whose midpoint sits farthest
+        # from any seam dot so the seam hit-test (which fires first) can't claim
+        # the click. On a small headless canvas the pixel->data tolerance is
+        # coarse, so pick the least-ambiguous point rather than a fixed sub.
+        def sub_mid(sub):
+            if sub[0] == "arc":
+                _, cx, cy, r, sa, ea = sub
+                m = math.radians((sa + ea) / 2.0)
+                return (cx + r * math.cos(m), cy + r * math.sin(m))
+            return ((sub[1][0] + sub[2][0]) / 2.0,
+                    (sub[1][1] + sub[2][1]) / 2.0)
+
+        seams = [s.point for s in a._seams]
+
+        def min_seam_dist(pt):
+            return min((math.hypot(pt[0] - sx, pt[1] - sy)
+                        for (sx, sy) in seams), default=1e9)
+
+        mids = [sub_mid(s) for s in a._polylines[0]["subs"]]
+        px, py = max(mids, key=min_seam_dist)
         ev = SimpleNamespace(inaxes=a.after_ax, xdata=px, ydata=py, key=None)
         a._on_segment_click(ev)
         keys = list(a._sel_entities.keys())

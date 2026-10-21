@@ -149,8 +149,18 @@ class App:
         ttk.Checkbutton(top, text="Convert splines to arcs",
                         variable=self.arc_mode).pack(side="right", padx=10)
 
+        # Tabbed body: the working view and a Tips reference page.
+        self.nb = ttk.Notebook(self.root)
+        self.nb.pack(fill="both", expand=True)
+
+        work_tab = ttk.Frame(self.nb)
+        self.nb.add(work_tab, text="Workspace")
+        tips_tab = ttk.Frame(self.nb)
+        self.nb.add(tips_tab, text="Tips")
+        self._build_tips_tab(tips_tab)
+
         # Preview panes
-        mid = ttk.Frame(self.root, padding=8)
+        mid = ttk.Frame(work_tab, padding=8)
         mid.pack(fill="both", expand=True)
 
         # Points table (right rail) -- packed FIRST so it always reserves its
@@ -243,6 +253,108 @@ class App:
         if _HAS_DND:
             self.root.drop_target_register(DND_FILES)
             self.root.dnd_bind("<<Drop>>", self._on_drop)
+
+    # ----------------------------------------------------------- tips tab
+    def _build_tips_tab(self, parent):
+        """A scrollable, read-only reference page explaining the workflow,
+        the click/drag behavior in the After view, and the coordinate chart.
+        Kept in sync with the actual handlers in this file."""
+        wrap = ttk.Frame(parent, padding=8)
+        wrap.pack(fill="both", expand=True)
+        txt = tk.Text(wrap, wrap="word", padx=10, pady=8,
+                      relief="flat", cursor="arrow")
+        scroll = ttk.Scrollbar(wrap, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+
+        # Simple heading / body styling.
+        txt.tag_configure("h1", font=("Segoe UI", 13, "bold"),
+                          spacing1=10, spacing3=4)
+        txt.tag_configure("h2", font=("Segoe UI", 10, "bold"),
+                          spacing1=8, spacing3=2)
+        txt.tag_configure("body", font=("Segoe UI", 9), spacing3=2,
+                          lmargin1=12, lmargin2=12)
+        txt.tag_configure("bullet", font=("Segoe UI", 9), spacing3=2,
+                          lmargin1=20, lmargin2=32)
+
+        def h1(s): txt.insert("end", s + "\n", "h1")
+        def h2(s): txt.insert("end", s + "\n", "h2")
+        def body(s): txt.insert("end", s + "\n", "body")
+        def bullet(s): txt.insert("end", "\u2022  " + s + "\n", "bullet")
+
+        h1("Tips & How It Works")
+        body("DXF Cleanup optimizes a drawing for CNC chaining: it converts "
+             "faceted splines to arcs and breaks every line where another "
+             "entity crosses it. After the automatic clean you can inspect and "
+             "hand-edit the geometry, then save a new DXF. Your original file "
+             "is never changed.")
+
+        h2("The basic workflow")
+        bullet("Click \"Choose DXF...\" (or drag a .dxf onto the window) to "
+               "load a drawing. It appears in the Before view.")
+        bullet("Click \"Clean\" to run the automatic optimization. The result "
+               "appears in the After (cleaned) view.")
+        bullet("Inspect and hand-edit in the After view (see below).")
+        bullet("Click \"Save As...\" to write a new <name>_clean.dxf.")
+        bullet("\"Convert splines to arcs\" (top-right) is on by default and "
+               "gives CNC-friendly G2/G3 arcs instead of many short lines.")
+
+        h2("Clicking in the After view")
+        bullet("CLICK a line, arc, or circle to SELECT it. It highlights green "
+               "and its key points are dotted and listed in the chart.")
+        bullet("CLICK-AND-DRAG on empty space to draw a rectangle and select "
+               "everything inside it (window select).")
+        bullet("CTRL-CLICK a selected entity (or CTRL-DRAG a rectangle) to "
+               "DESELECT it. A shared endpoint stays marked while any other "
+               "selected entity still uses it.")
+        bullet("The nearest entity within a small tolerance wins, so you do "
+               "not have to click exactly on the line.")
+
+        h2("Joining segments into a chain")
+        bullet("Select two or more segments that touch end-to-end, then click "
+               "\"Join selected\". They fuse into one polyline the control can "
+               "chain in a single pick.")
+        bullet("Already joined? Select that chain PLUS more adjacent segments "
+               "and Join again to EXTEND it.")
+        bullet("If your selection has a branch (a fork) or a disconnected "
+               "piece, the longest connected run is joined and the rest is "
+               "left in place -- the report says what was left out.")
+
+        h2("Splitting a chain back apart")
+        bullet("A joined chain shows faint, outlined dots at each former "
+               "segment boundary (its \"seams\"). Click one to arm a cut "
+               "there -- it turns into a solid red marker.")
+        bullet("Click \"Split at point\" to cut the chain at that seam into "
+               "two pieces. The cut point becomes a solid endpoint on both.")
+        bullet("Clicking the chain itself (not a seam dot) selects the WHOLE "
+               "chain as one unit, same as any other entity.")
+        bullet("CTRL-CLICK an armed seam dot to cancel the pending cut.")
+
+        h2("The coordinate chart (right rail)")
+        bullet("Every key point of the cleaned geometry is numbered here: line "
+               "endpoints, arc sweep ends, and circle centre + 4 quadrants.")
+        bullet("Selecting an entity in the drawing dots and shows its points "
+               "here; clicking a chart ROW toggles a red dot at that point in "
+               "the After view. Several can be marked at once.")
+        bullet("\"Select all\" / \"Clear all\" mark or clear every point.")
+        bullet("\"Save points CSV...\" exports the numbered coordinate list "
+               "for setup sheets or probing.")
+
+        h2("Preview navigation")
+        bullet("Each view has a toolbar: box-zoom, pan, and Home to reset. The "
+               "mouse wheel zooms too. Zoom in for precise clicks on dense "
+               "geometry.")
+        bullet("Panning/zooming is a view action only -- it never selects or "
+               "edits anything.")
+
+        h2("Good to know")
+        bullet("Nothing is written until you click Save As..., and the save "
+               "writes a NEW file -- your original DXF is untouched.")
+        bullet("The report box at the bottom summarizes each clean/join/split "
+               "and flags anything left out.")
+
+        txt.configure(state="disabled")   # read-only
 
     # ------------------------------------------------------- canvas factory
     def _make_canvas(self, parent):
