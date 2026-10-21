@@ -8,6 +8,9 @@ build/
 dist/
 *.egg-info/
 *.spec
+# ...but DO track the canonical build recipe so a fresh clone can reproduce
+# dist/DXFCleanup.exe (see build.ps1).
+!DXFCleanup.spec
 
 # PyInstaller work dirs
 *.manifest

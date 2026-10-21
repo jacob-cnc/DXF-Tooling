@@ -104,7 +104,28 @@ with a **Save points CSV…** button. Headless:
 Prints the table; the optional second argument also writes it as CSV
 (`index,x,y,kind`).
 
-## Acceptance test
+## Tests
+
+Install the dev dependencies (test runner + packaging), then run the suite:
+
+```powershell
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest
+```
+
+The full suite (65+ tests across `tests/`) covers the cleanup engine, arc
+fitting, overlap merging, spline conversion, the pure edit-geometry
+(`dxfclean/editgeom.py`) and join/split surgery (`dxfclean/editops.py`), plus
+the GUI's selection/join/split behavior. The three GUI tests run for real when
+a display is available and skip cleanly when headless. Every file is also
+runnable standalone (e.g. `python tests\test_acceptance.py`) via its `__main__`
+block.
+
+CI runs `pytest` on every push and pull request to `main`
+(`.github/workflows/ci.yml`, Windows runner — matches the target platform and
+ships Tk so the GUI tests execute).
+
+### Gating acceptance fixture
 
 The regression fixture `fixtures/delrin_peg_ARCS_unsplit.dxf` (6 lines + 2 arcs
 + 1 circle) must clean to **11 line segments + 2 arcs + 1 circle**, with **zero**
@@ -112,11 +133,8 @@ zero-length segments and **no** line having another entity cross its interior.
 Before/after PNGs are written to `docs/`.
 
 ```powershell
-& "C:\Users\jhonick\AppData\Local\Python\pythoncore-3.15-64\python.exe" tests\test_acceptance.py
+python -m pytest tests\test_acceptance.py
 ```
-
-(Also runnable under `pytest` if installed:
-`… -m pytest tests\test_acceptance.py`.)
 
 ## Repository layout
 
@@ -124,15 +142,23 @@ Before/after PNGs are written to `docs/`.
 dxfclean/
   core.py      core cleanup (ported split algorithm + spline handling + report)
   render.py    DXF -> PNG renderer (ported from render_dxf.py)
+  points.py    coordinate extraction / numbering
+  arcfit.py    biarc spline-to-arc fitting
+  joinseg.py   chain ordering (longest connected path)
+  editgeom.py  pure hit-test + chain-split geometry (no Tk/matplotlib)
+  editops.py   join/split DXF modelspace surgery
   cli.py       command-line entry point
 app.py         Tkinter GUI
-tests/
-  test_acceptance.py   the gating regression test
-fixtures/
-  delrin_peg_ARCS_unsplit.dxf   known-good regression fixture
+tests/         pytest suite (engine + GUI behavior)
+fixtures/      known-good regression fixtures
 docs/          before.png / after.png (rendered by the acceptance test)
 examples/      cleaned fixture output
-requirements.txt
+requirements.txt       runtime deps (pinned)
+requirements-dev.txt   test + packaging deps (pinned)
+DXFCleanup.spec        PyInstaller build recipe (version-controlled)
+build.ps1              one-command exe build
+pytest.ini             test discovery config
+.github/workflows/     CI (pytest on push / PR)
 ```
 
 ## Non-goals
@@ -149,15 +175,18 @@ shipped build is a **single self-contained file** — one `DXFCleanup.exe` a
 colleague can double-click with nothing else installed (no Python, no admin). End-user
 instructions are in [`INSTALL.md`](INSTALL.md).
 
-Rebuild from source (install PyInstaller into the **real** interpreter first,
-mind the MS Store python-stub trap above):
+Rebuild from source. The PyInstaller recipe is version-controlled in
+`DXFCleanup.spec` (bundles the `dxfclean` submodules and ezdxf's data files),
+and `build.ps1` wraps the whole build in one command:
 
 ```powershell
-& "C:\Users\jhonick\AppData\Local\Python\pythoncore-3.15-64\python.exe" -m pip install pyinstaller
-& "C:\Users\jhonick\AppData\Local\Python\pythoncore-3.15-64\python.exe" -m PyInstaller --noconfirm --onefile --windowed --name DXFCleanup app.py
+python -m pip install -r requirements.txt -r requirements-dev.txt
+.\build.ps1
 ```
 
-Output: `dist\DXFCleanup.exe` (~44 MB, self-contained).
+Output: `dist\DXFCleanup.exe` (~44 MB, self-contained). `build.ps1` cleans the
+previous `build\`/`dist\` and runs `python -m PyInstaller --noconfirm
+DXFCleanup.spec`, so a fresh clone reproduces the same exe.
 
 > **Trade-offs.** `--onefile` unpacks to a temp dir on each launch, so the
 > **first** start is a few seconds and antivirus occasionally false-flags it.
