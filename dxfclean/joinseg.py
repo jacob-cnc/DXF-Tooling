@@ -19,7 +19,11 @@ import math
 from typing import List, Optional, Tuple
 
 Vec = Tuple[float, float]
-JOIN_TOL = 1e-4   # endpoint coincidence tolerance (drawing units)
+# Endpoint coincidence tolerance (drawing units). Biarc-fitted arc endpoints
+# carry floating-point error well above 1e-4, and two segments that visibly
+# meet can differ by ~1e-3..1e-2 after fitting, so 1e-4 wrongly rejected real
+# chains. 1e-3 mm is still far tighter than any CAD/CNC positioning tolerance.
+JOIN_TOL = 1e-3
 
 
 def _dist(a: Vec, b: Vec) -> float:
@@ -56,46 +60,112 @@ def order_chain(geoms, tol: float = JOIN_TOL):
     """Order the selected geoms into one connected chain.
 
     Returns a list of ``(point, bulge_to_next)`` vertices (bulge of the LAST
-    vertex is 0), or None if the selection is NOT a single unbroken path
-    (disjoint, branching, or with a gap larger than ``tol``).
+    vertex is 0), or None if NO chain of >=2 entities can be formed. Kept for
+    back-compat; prefer ``longest_chain`` which also reports leftovers.
+    """
+    chain, _used, leftover, _reason = longest_chain(geoms, tol)
+    if chain is None or leftover:
+        # Strict callers want all-or-nothing; a leftover means not a clean path.
+        return chain if (chain is not None and not leftover) else None
+    return chain
+
+
+def _branch_nodes(items, tol):
+    """Return the count of entity-endpoints incident on each clustered node,
+    so a node touched by >=3 endpoints is a branch (fork)."""
+    nodes = []          # representative points
+    counts = []
+    def node_of(p):
+        for i, q in enumerate(nodes):
+            if _dist(p, q) <= tol:
+                return i
+        nodes.append(p); counts.append(0)
+        return len(nodes) - 1
+    for (p0, p1, _b) in items:
+        counts[node_of(p0)] += 1
+        counts[node_of(p1)] += 1
+    return nodes, counts
+
+
+def longest_chain(geoms, tol: float = JOIN_TOL):
+    """Build the LONGEST single connected path through the selected geoms.
+
+    Returns ``(chain, used_geoms, leftover_geoms, reason)`` where:
+      * ``chain``   -- list of ``(point, bulge_to_next)`` vertices, or None if
+                       fewer than 2 entities could be chained;
+      * ``used_geoms``    -- the geoms that went into the chain, in input form;
+      * ``leftover_geoms``-- geoms NOT in the chain (a branch stub, a
+                             disconnected piece, or the far side of a fork);
+      * ``reason``  -- short human string describing any leftover / failure.
+
+    Policy: a fork (a point where 3+ selected segments meet) cannot be one
+    polyline, so we take the longest path THROUGH it and leave the branch out,
+    rather than rejecting the whole selection. A genuinely disconnected piece
+    is likewise left over.
     """
     items = []
     for g in geoms:
         ep = _endpoints(g)
         if ep is None:
-            return None
+            return None, [], list(geoms), "a selected item is not a line or arc"
         items.append(ep)      # (p0, p1, bulge)
     if len(items) < 2:
-        return None
+        return None, [], list(geoms), "select at least two touching segments"
 
-    used = [False] * len(items)
-    # Start from item 0 in its given orientation.
-    used[0] = True
-    p0, p1, b = items[0]
-    chain = [(p0, b)]         # (vertex, bulge_to_next)
-    tail = p1                 # current open end
+    _nodes, counts = _branch_nodes(items, tol)
+    has_fork = any(c >= 3 for c in counts)
 
-    for _ in range(len(items) - 1):
-        found = False
-        for j, (q0, q1, qb) in enumerate(items):
-            if used[j]:
-                continue
-            if _dist(tail, q0) <= tol:
-                chain.append((q0, qb))
-                tail = q1
-                used[j] = True
-                found = True
-                break
-            if _dist(tail, q1) <= tol:
-                # entity runs the other way: flip it (reverse bulge sign)
-                chain.append((q1, -qb))
-                tail = q0
-                used[j] = True
-                found = True
-                break
-        if not found:
-            return None       # gap / disjoint selection
-    if not all(used):
-        return None
-    chain.append((tail, 0.0))  # closing vertex, no bulge after it
-    return chain
+    # Greedily grow a chain from item 0 outward at BOTH ends. At a fork we stop
+    # growing that end (ambiguous), which naturally leaves the branch out.
+    def build_from(seed):
+        used = [False] * len(items)
+        used[seed] = True
+        sp, ep_, b = items[seed]
+        chain = [(sp, b), (ep_, 0.0)]
+        progress = True
+        while progress:
+            progress = False
+            tailp, headp = chain[-1][0], chain[0][0]
+            # candidates meeting each open end
+            for j in range(len(items)):
+                if used[j]:
+                    continue
+                q0, q1, qb = items[j]
+                if _dist(tailp, q0) <= tol:
+                    chain[-1] = (chain[-1][0], qb); chain.append((q1, 0.0))
+                    used[j] = True; progress = True; break
+                if _dist(tailp, q1) <= tol:
+                    chain[-1] = (chain[-1][0], -qb); chain.append((q0, 0.0))
+                    used[j] = True; progress = True; break
+                if _dist(headp, q1) <= tol:
+                    chain.insert(0, (q0, qb)); used[j] = True
+                    progress = True; break
+                if _dist(headp, q0) <= tol:
+                    chain.insert(0, (q1, -qb)); used[j] = True
+                    progress = True; break
+        return chain, used
+
+    # Try growing from every seed; keep the chain that consumes the most edges.
+    best = None
+    for s in range(len(items)):
+        chain, used = build_from(s)
+        n = sum(used)
+        if best is None or n > best[0]:
+            best = (n, chain, used)
+    n_used, chain, used = best
+    if n_used < 2:
+        return None, [], list(geoms), "the segments do not touch end-to-end"
+
+    used_geoms = [geoms[i] for i in range(len(items)) if used[i]]
+    leftover = [geoms[i] for i in range(len(items)) if not used[i]]
+    if leftover:
+        if has_fork:
+            reason = ("%d segment(s) form a branch off the main path and "
+                      "can't be part of one polyline -- joined the longest "
+                      "run and left the branch out" % len(leftover))
+        else:
+            reason = ("%d segment(s) are not connected to the main run and "
+                      "were left out" % len(leftover))
+    else:
+        reason = ""
+    return chain, used_geoms, leftover, reason

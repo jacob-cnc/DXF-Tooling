@@ -12,7 +12,39 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, REPO)
 
-from dxfclean.joinseg import order_chain  # noqa: E402
+from dxfclean.joinseg import order_chain, longest_chain  # noqa: E402
+
+
+def test_longest_chain_takes_main_path_and_leaves_branch():
+    """A fork: three segments meet at (10,0). longest_chain must join the
+    longest straight run and leave the stub out (not reject everything)."""
+    main_a = ("line", (0, 0), (10, 0))
+    main_b = ("line", (10, 0), (20, 0))
+    stub = ("line", (10, 0), (10, 5))      # branch off the junction
+    chain, used, leftover, reason = longest_chain([main_a, main_b, stub])
+    assert chain is not None
+    assert len(used) == 2 and len(leftover) == 1
+    assert leftover[0] == stub
+    assert "branch" in reason
+
+
+def test_longest_chain_leaves_disconnected_piece():
+    a = ("line", (0, 0), (10, 0))
+    b = ("line", (10, 0), (20, 0))
+    far = ("line", (90, 90), (99, 90))
+    chain, used, leftover, reason = longest_chain([a, b, far])
+    assert chain is not None
+    assert far in leftover and len(used) == 2
+    assert "not connected" in reason
+
+
+def test_longest_chain_clean_run_no_leftover():
+    chain, used, leftover, reason = longest_chain(
+        [("line", (0, 0), (10, 0)),
+         ("line", (10, 0), (10, 10)),
+         ("line", (10, 10), (0, 10))])
+    assert chain is not None and not leftover and reason == ""
+    assert len(used) == 3
 
 
 def test_two_lines_connected():
@@ -64,6 +96,46 @@ def test_three_segment_chain():
                          ("line", (10, 10), (0, 10))])
     assert chain is not None
     assert len(chain) == 4
+
+
+def test_interior_first_segment_orders():
+    """Repro of the reported Join bug: the chain's FIRST selected item sits in
+    the MIDDLE of the path. The old forward-only walk grew only from item 0's
+    tail and never matched the neighbour on item 0's start side, so it wrongly
+    reported 'not a single connected chain'. Both-ends growth must handle it."""
+    # Path A-B-C-D given with the middle piece (B-C) first.
+    middle = ("line", (10, 0), (20, 0))
+    left = ("line", (0, 0), (10, 0))
+    right = ("line", (20, 0), (30, 0))
+    chain = order_chain([middle, left, right])
+    assert chain is not None, "interior-first selection wrongly rejected"
+    assert len(chain) == 4
+    xs = [round(v[0][0], 4) for v in chain]
+    assert xs == [0, 10, 20, 30] or xs == [30, 20, 10, 0], \
+        "chain not ordered end-to-end: %r" % xs
+
+
+def test_two_collinear_verticals_sharing_midpoint():
+    """The exact second-screenshot case: two vertical segments meeting at a
+    shared midpoint, given middle-out / reversed. Must join."""
+    top = ("line", (50.0, 6.0371), (50.0, 0.0))
+    bottom = ("line", (50.0, 0.0), (50.0, -50.0))
+    assert order_chain([top, bottom]) is not None
+    # reversed orientations too
+    assert order_chain([("line", (50.0, 0.0), (50.0, 6.0371)),
+                        ("line", (50.0, -50.0), (50.0, 0.0))]) is not None
+
+
+def test_small_fit_gap_within_tolerance_joins():
+    """Biarc-fitted endpoints differ by ~1e-3; such a seam must still join
+    (the old 1e-4 tolerance rejected it)."""
+    a = ("line", (0.0, 0.0), (10.0, 0.0))
+    b = ("line", (10.0008, 0.0), (20.0, 0.0))   # 8e-4 seam gap
+    assert order_chain([a, b]) is not None, \
+        "a sub-millimetre fit seam should join"
+    # but a genuine gap is still rejected
+    c = ("line", (10.05, 0.0), (20.0, 0.0))     # 0.05 gap
+    assert order_chain([a, c]) is None
 
 
 def run():
