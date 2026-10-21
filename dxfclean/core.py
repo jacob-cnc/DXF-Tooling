@@ -423,12 +423,48 @@ def clean_doc(doc, spline_to_arcs=False, arc_tol=0.005
     report = CleanReport()
     msp = doc.modelspace()
 
+    lines, arcs, circles, extra_line_segs, fitted_arcs = _collect_entities(
+        msp, report, spline_to_arcs, arc_tol)
+
+    # All line segments to be split: native lines + spline-derived segments.
+    line_segs = [((l.dxf.start.x, l.dxf.start.y),
+                  (l.dxf.end.x, l.dxf.end.y)) for l in lines]
+    line_layers = [l.dxf.layer for l in lines]
+    for (p0, p1, ly) in extra_line_segs:
+        line_segs.append((p0, p1))
+        line_layers.append(ly)
+
+    # Merge collinear overlapping/duplicate lines into their union BEFORE
+    # splitting, so the proven splitter never sees stacked duplicates. Runs
+    # per-layer; gaps between colinear pieces are preserved.
+    line_segs, line_layers, report.overlaps_merged = \
+        merge_overlapping_lines(line_segs, line_layers)
+
+    new_lines, dropped = _split_lines_at_intersections(
+        line_segs, line_layers, arcs, circles)
+
+    report.segments_dropped = dropped
+    report.lines_out = len(new_lines)
+    report.out_lines = list(new_lines)
+
+    ndoc = _build_output_doc(doc, new_lines, arcs, circles, fitted_arcs)
+    return ndoc, report
+
+
+def _collect_entities(msp, report: CleanReport, spline_to_arcs: bool,
+                      arc_tol: float):
+    """Pass over the modelspace, classifying entities and converting splines.
+
+    Returns ``(lines, arcs, circles, extra_line_segs, fitted_arcs)`` where
+    ``lines`` are native LINE entities, ``arcs``/``circles`` are value tuples,
+    ``extra_line_segs`` are ``(p0, p1, layer)`` lines synthesized from splines
+    (which take part in splitting like native lines), and ``fitted_arcs`` are
+    ``(cx, cy, r, start_deg, end_deg, layer)`` arcs fitted from splines (emitted
+    directly, NOT split). Populates the entity-count and spline fields of
+    ``report``.
+    """
     lines, arcs, circles, others = [], [], [], []
-    # extra_line_segs holds lines synthesized from splines; they take part in
-    # splitting exactly like native LINE entities.
     extra_line_segs: List[Tuple[Tuple[float, float], Tuple[float, float], str]] = []
-    # fitted_arcs holds arcs synthesized from splines (spline_to_arcs mode):
-    # (cx, cy, r, start_deg, end_deg, layer). Emitted directly; NOT split.
     fitted_arcs: List[Tuple[float, float, float, float, float, str]] = []
 
     for e in msp:
@@ -481,21 +517,17 @@ def clean_doc(doc, spline_to_arcs=False, arc_tol=0.005
             "Unhandled entity %s on layer %r dropped."
             % (e.dxftype(), getattr(e.dxf, "layer", "?"))
         )
+    return lines, arcs, circles, extra_line_segs, fitted_arcs
 
-    # All line segments to be split: native lines + spline-derived segments.
-    line_segs = [((l.dxf.start.x, l.dxf.start.y),
-                  (l.dxf.end.x, l.dxf.end.y)) for l in lines]
-    line_layers = [l.dxf.layer for l in lines]
-    for (p0, p1, ly) in extra_line_segs:
-        line_segs.append((p0, p1))
-        line_layers.append(ly)
 
-    # NEW: merge collinear overlapping/duplicate lines into their union BEFORE
-    # splitting, so the proven splitter never sees stacked duplicates. Runs
-    # per-layer; gaps between colinear pieces are preserved.
-    line_segs, line_layers, report.overlaps_merged = \
-        merge_overlapping_lines(line_segs, line_layers)
+def _split_lines_at_intersections(line_segs, line_layers, arcs, circles):
+    """Break every line segment wherever another entity touches its interior.
 
+    This is the proven, machine-validated split algorithm (ported verbatim
+    from ``split_lines_at_intersections.py``); its results must not change.
+    Returns ``(new_lines, dropped)`` where ``new_lines`` is a list of
+    ``(p0, p1, layer)`` and ``dropped`` counts zero-length/degenerate pieces.
+    """
     new_lines = []  # (p0, p1, layer)
     dropped = 0
     for i in range(len(line_segs)):
@@ -554,12 +586,13 @@ def clean_doc(doc, spline_to_arcs=False, arc_tol=0.005
                 dropped += 1
                 continue  # skip degenerate / zero-length segment
             new_lines.append((p0, p1, line_layers[i]))
+    return new_lines, dropped
 
-    report.segments_dropped = dropped
-    report.lines_out = len(new_lines)
-    report.out_lines = list(new_lines)
 
-    # Build output doc
+def _build_output_doc(doc, new_lines, arcs, circles, fitted_arcs):
+    """Create a fresh ezdxf document carrying the cleaned geometry: the split
+    lines, the original arcs/circles, and any spline-fitted arcs. Copies the
+    source's DXF version, units and layer table."""
     ndoc = ezdxf.new(doc.dxfversion)
     try:
         ndoc.units = doc.units
@@ -581,8 +614,7 @@ def clean_doc(doc, spline_to_arcs=False, arc_tol=0.005
     for (cx, cy, r, sa, ea, ly) in fitted_arcs:
         nmsp.add_arc((cx, cy), r, start_angle=sa, end_angle=ea,
                      dxfattribs={"layer": ly})
-
-    return ndoc, report
+    return ndoc
 
 
 def clean_file(src: str, out: str | None = None, spline_to_arcs=False,
