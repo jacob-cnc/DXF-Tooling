@@ -351,97 +351,46 @@ class App:
         a disconnected piece is left in place and reported."""
         if self._cleaned_doc is None or len(self._sel_entities) < 2:
             return
-        from dxfclean import longest_chain
-        all_geoms = list(self._sel_entities.values())
-        loose = [g for g in all_geoms if g and g[0] != "poly"]
-        poly_idx = [g[1] for g in all_geoms if g and g[0] == "poly"]
-        # Expand each selected child into its sub-geometry so it can be merged.
-        poly_subs = []
-        for i in poly_idx:
-            if 0 <= i < len(self._polylines):
-                poly_subs.extend(self._polylines[i]["subs"])
-        # Candidate chain members: loose segments + every child's sub-segments.
-        members = loose + poly_subs
-        # Need at least two members, and the operation must do something beyond
-        # re-stating a single existing child unchanged.
-        if len(members) < 2 or (not loose and len(poly_idx) < 2):
+        from dxfclean import join_in_modelspace
+        msp = self._cleaned_doc.modelspace()
+        res = join_in_modelspace(msp, list(self._sel_entities.values()),
+                                 self._polylines, self._geom_key)
+        if res.error_kind == "too_few":
             messagebox.showinfo(
                 "Join", "Select at least two touching segments to join, or a "
                 "joined chain plus more segments to extend it.")
             return
-        chain, used_geoms, leftover, reason = longest_chain(members)
-        if chain is None:
+        if not res.ok:
             messagebox.showwarning(
                 "Join",
-                "The selected segments don't touch end-to-end. " + (reason or "")
+                "The selected segments don't touch end-to-end. "
+                + (res.reason or "")
                 + "\nSelect segments that share endpoints and try again.")
             return
-        msp = self._cleaned_doc.modelspace()
-        layer = "0"
-        # Delete the consumed loose entities.
-        to_delete = []
-        for e in msp:
-            if e.dxftype() in ("LINE", "ARC") \
-                    and self._entity_matches_any(e, used_geoms):
-                to_delete.append(e)
-                try:
-                    layer = e.dxf.layer
-                except Exception:
-                    pass
-        # Delete the consumed joined children (any whose sub-geom was used).
-        used_set = set(self._geom_key(g) for g in used_geoms)
-        consumed_poly_verts = []
-        for i in poly_idx:
-            subs = self._polylines[i]["subs"]
-            if any(self._geom_key(s) in used_set for s in subs):
-                consumed_poly_verts.append(self._polylines[i]["verts"])
-        for e in list(msp):
-            if e.dxftype() in ("LWPOLYLINE", "POLYLINE"):
-                if self._polyline_matches(e, consumed_poly_verts):
-                    to_delete.append(e)
-        for e in to_delete:
-            try:
-                msp.delete_entity(e)
-            except Exception:
-                pass
-        # LWPOLYLINE vertices: (x, y, start_width, end_width, bulge).
-        verts = [v[0] for v in chain]
-        pts = [(v[0][0], v[0][1], 0.0, 0.0, v[1]) for v in chain]
-        msp.add_lwpolyline(pts, format="xyseb", dxfattribs={"layer": layer})
+        verts = res.vertices
         interior = [verts[i] for i in range(1, len(verts) - 1)]
         self._join_parents.append({
             "vertices": list(verts),
             "endpoints": [verts[0], verts[-1]],
             "seams": interior,
         })
-        n = len(used_geoms)
+        n = res.n_used
         self.clear_all_points()
         self._refresh_after()
-        extended = bool(poly_idx)
-        verb = "Extended the chain to" if extended else "Joined"
+        verb = "Extended the chain to" if res.extended else "Joined"
         msg = "%s %d segments into one polyline chain." % (verb, n)
-        if leftover:
-            msg += "\nLeft out: " + reason
+        if res.leftover:
+            msg += "\nLeft out: " + res.reason
         msg += "\n(Not saved yet -- use Save As...)"
         self._set_report(msg)
-        if leftover:
+        if res.leftover:
             messagebox.showinfo("Join", "%s %d segments.\n\n%s"
-                                % (verb, n, reason))
+                                % (verb, n, res.reason))
 
     def _polyline_matches(self, e, verts_list) -> bool:
-        """True if polyline entity ``e`` has one of the given vertex sequences
-        (matched endpoint-to-endpoint, order-independent)."""
-        try:
-            epts = [(p[0], p[1]) for p in e.get_points("xy")]
-        except Exception:
-            return False
-        for verts in verts_list:
-            if len(epts) != len(verts):
-                continue
-            if all(_close(epts[k], verts[k]) for k in range(len(verts))) or \
-               all(_close(epts[k], verts[-1 - k]) for k in range(len(verts))):
-                return True
-        return False
+        """Thin wrapper -> dxfclean.editops.polyline_matches."""
+        from dxfclean import polyline_matches
+        return polyline_matches(e, verts_list)
 
     # ----------------------------------------------------------- split
     def _arm_split(self, seam_k):
@@ -483,30 +432,12 @@ class App:
         if pi >= len(self._polylines):
             self._clear_pending_split()
             return
+        from dxfclean import split_in_modelspace
         poly = self._polylines[pi]
-        subs, verts = poly["subs"], poly["verts"]
-        left_subs, right_subs = _eg.split_chain_subs(subs, vi)
-        if left_subs is None:
+        msp = self._cleaned_doc.modelspace()
+        if not split_in_modelspace(msp, poly["subs"], poly["verts"], vi):
             self._clear_pending_split()
             return
-        msp = self._cleaned_doc.modelspace()
-        layer = "0"
-        # Delete the original polyline entity.
-        for e in list(msp):
-            if e.dxftype() in ("LWPOLYLINE", "POLYLINE") \
-                    and self._polyline_matches(e, [verts]):
-                try:
-                    layer = e.dxf.layer
-                except Exception:
-                    pass
-                try:
-                    msp.delete_entity(e)
-                except Exception:
-                    pass
-                break
-        # Emit each side.
-        for side in (left_subs, right_subs):
-            self._emit_subs(msp, side, layer)
         self._pending_split = None
         if self.split_btn is not None:
             self.split_btn.configure(state="disabled")
@@ -516,44 +447,14 @@ class App:
                          "(Not saved yet -- use Save As...)")
 
     def _emit_subs(self, msp, subs, layer):
-        """Emit a list of sub-geoms as a single LWPOLYLINE (>=2 subs) or as a
-        plain LINE/ARC (exactly 1 sub -- no longer a chain). The vertex/bulge
-        math lives in dxfclean.editgeom; this only writes DXF entities."""
-        if not subs:
-            return
-        attribs = {"layer": layer}
-        if len(subs) == 1:
-            s = subs[0]
-            if s[0] == "line":
-                _, p0, p1 = s
-                msp.add_line(p0, p1, dxfattribs=attribs)
-            else:
-                _, cx, cy, r, sa, ea = s
-                msp.add_arc((cx, cy), r, sa, ea, dxfattribs=attribs)
-            return
-        pts = _eg.subs_to_lwpoly_points(subs)
-        msp.add_lwpolyline(pts, format="xyseb", dxfattribs=attribs)
+        """Thin wrapper -> dxfclean.editops.emit_subs."""
+        from dxfclean import emit_subs
+        emit_subs(msp, subs, layer)
 
     def _entity_matches_any(self, e, geoms) -> bool:
-        """True if a live cleaned entity corresponds to one of ``geoms``."""
-        t = e.dxftype()
-        for g in geoms:
-            if g[0] == "line" and t == "LINE":
-                p0, p1 = g[1], g[2]
-                s = (e.dxf.start.x, e.dxf.start.y)
-                en = (e.dxf.end.x, e.dxf.end.y)
-                if (_close(s, p0) and _close(en, p1)) or \
-                   (_close(s, p1) and _close(en, p0)):
-                    return True
-            elif g[0] == "arc" and t == "ARC":
-                _, cx, cy, r, sa, ea = g
-                if (abs(e.dxf.center.x - cx) < 1e-4
-                        and abs(e.dxf.center.y - cy) < 1e-4
-                        and abs(e.dxf.radius - r) < 1e-4
-                        and abs(e.dxf.start_angle - sa) < 1e-3
-                        and abs(e.dxf.end_angle - ea) < 1e-3):
-                    return True
-        return False
+        """Thin wrapper -> dxfclean.editops.entity_matches_any."""
+        from dxfclean import entity_matches_any
+        return entity_matches_any(e, geoms)
 
 
     def _refresh_after(self):
