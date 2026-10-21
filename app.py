@@ -48,54 +48,6 @@ _SEAM_FILL = "#1E6FE0"      # latent parent-seam dot: blue, drawn translucent
 _SEAM_EDGE = "#0B3D91"      # latent parent-seam dot outline (darker blue)
 
 
-class _DragLog:
-    """Lightweight in-memory event log for diagnosing the after-view drag
-    gesture. Captures every press/motion/release (matplotlib AND Tk) with
-    coords, in-axis flag, toolbar mode and drag state, and writes the whole
-    trace to a file when the app closes. Enabled by setting the environment
-    variable ``DXFCLEANUP_DEBUG=1`` or running with ``--debug``; otherwise it
-    is a no-op so normal users pay nothing.
-
-    One bad top-down drag + closing the app produces a log the developer can
-    read to see exactly which events fired and where they were dropped."""
-
-    def __init__(self, enabled, path):
-        self.enabled = bool(enabled)
-        self.path = path
-        self.lines = []
-        self._t0 = None
-
-    def log(self, tag, **fields):
-        if not self.enabled:
-            return
-        import time
-        now = time.time()
-        if self._t0 is None:
-            self._t0 = now
-        dt = (now - self._t0) * 1000.0           # ms since first event
-        parts = ["%8.1fms" % dt, "%-22s" % tag]
-        for k, v in fields.items():
-            if isinstance(v, float):
-                v = round(v, 3)
-            parts.append("%s=%s" % (k, v))
-        self.lines.append(" ".join(parts))
-
-    def flush(self):
-        if not self.enabled or not self.lines:
-            return
-        try:
-            import datetime
-            header = ("DXF Cleanup drag-event log -- %s\n%d events\n%s\n"
-                      % (datetime.datetime.now().isoformat(timespec="seconds"),
-                         len(self.lines), "-" * 60))
-            with open(self.path, "w", encoding="utf-8") as fh:
-                fh.write(header)
-                fh.write("\n".join(self.lines))
-                fh.write("\n")
-        except Exception:
-            pass
-
-
 def _close(a, b, tol=1e-4):
     """Point equality within tol."""
     return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
@@ -194,29 +146,7 @@ class App:
         self._poly_endpoints = []    # joined-chain endpoint coords
         self._seam_dot_artists = []  # latent-dot artists (cleared on redraw)
 
-        # Optional drag-event diagnostics (DXFCLEANUP_DEBUG=1 or --debug).
-        _debug = (os.environ.get("DXFCLEANUP_DEBUG") in ("1", "true", "True")
-                  or "--debug" in sys.argv)
-        _logdir = os.path.join(os.path.expanduser("~"), "Desktop")
-        if not os.path.isdir(_logdir):
-            _logdir = os.path.expanduser("~")
-        self._draglog = _DragLog(
-            _debug, os.path.join(_logdir, "dxfcleanup_drag_log.txt"))
-
         self._build_ui()
-        # Flush the diagnostic log when the window closes.
-        try:
-            self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        except Exception:
-            pass
-
-    def _on_close(self):
-        """Flush diagnostics (if enabled) then close the window."""
-        try:
-            self._draglog.flush()
-        except Exception:
-            pass
-        self.root.destroy()
 
     # ---------------------------------------------------------------- UI
     def _build_ui(self):
@@ -838,16 +768,9 @@ class App:
         return "control" in k or "ctrl" in k
 
     def _on_after_press(self, event):
-        self._draglog.log("mpl_press", x=event.xdata, y=event.ydata,
-                          inaxes=(event.inaxes is self.after_ax),
-                          mode=getattr(self.after_toolbar, "mode", ""),
-                          key=getattr(event, "key", None),
-                          button=getattr(event, "button", None))
         if getattr(self.after_toolbar, "mode", ""):
-            self._draglog.log("mpl_press_SKIP", why="toolbar_mode")
             return
         if event.inaxes is not self.after_ax or event.xdata is None:
-            self._draglog.log("mpl_press_SKIP", why="not_in_axis")
             return
         if self._drag_start is not None:
             return   # Tk press already opened this drag
@@ -855,7 +778,6 @@ class App:
         self._drag_last = (event.xdata, event.ydata)
         # Latch the mode for the whole gesture: Ctrl = deselect, else select.
         self._drag_deselect = self._is_ctrl(event)
-        self._draglog.log("drag_open", via="mpl", deselect=self._drag_deselect)
 
     def _tk_to_data(self, wx, wy):
         """Convert Tk widget pixel coords (y-down from the top) to After-axis
@@ -880,20 +802,16 @@ class App:
         opens the drag."""
         wx, wy = getattr(event, "x", None), getattr(event, "y", None)
         ctrl = bool(getattr(event, "state", 0) & 0x0004)   # Tk Control mask
-        self._draglog.log("tk_press", wx=wx, wy=wy, ctrl=ctrl)
         if getattr(self.after_toolbar, "mode", ""):
             return   # pan/zoom active -- let the toolbar handle it
         if self._drag_start is not None:
             return   # already open
         x, y, in_axes = self._tk_to_data(wx, wy)
         if x is None:
-            self._draglog.log("tk_press_SKIP", why="no_convert")
             return
         self._drag_start = (x, y)
         self._drag_last = (x, y)
         self._drag_deselect = ctrl
-        self._draglog.log("drag_open", via="tk", deselect=ctrl,
-                          x=x, y=y, in_axes=in_axes)
 
     def _on_after_motion(self, event):
         if self._drag_start is None or event.inaxes is not self.after_ax \
@@ -902,7 +820,6 @@ class App:
         x0, y0 = self._drag_start
         x1, y1 = event.xdata, event.ydata
         self._drag_last = (x1, y1)   # remember for a release outside the axis
-        self._draglog.log("mpl_motion", x=x1, y=y1)
         if self._rubber is not None:
             try:
                 self._rubber.remove()
@@ -920,11 +837,6 @@ class App:
     def _on_after_release(self, event):
         """matplotlib release: finalize the drag using the event's data coords
         when it lands on the axis, else the last tracked in-axis point."""
-        self._draglog.log("mpl_release", x=getattr(event, "xdata", None),
-                          y=getattr(event, "ydata", None),
-                          inaxes=(getattr(event, "inaxes", None)
-                                  is self.after_ax),
-                          drag_open=(self._drag_start is not None))
         if self._drag_start is None:
             return
         if event is not None and event.xdata is not None \
@@ -940,15 +852,10 @@ class App:
         dispatched from the same Tk event -- gets first chance; this then
         no-ops because _drag_start is already cleared. Only a genuinely lost
         matplotlib release leaves the drag open for this to complete."""
-        self._draglog.log("tk_release", wx=getattr(_tk_event, "x", None),
-                          wy=getattr(_tk_event, "y", None),
-                          drag_open=(self._drag_start is not None))
 
         def _backstop():
             if self._drag_start is None:
-                self._draglog.log("tk_backstop_noop")
                 return   # matplotlib release already handled it
-            self._draglog.log("tk_backstop_FINISH")
             self._finish_drag(None, None, click_event=None)
         try:
             self.root.after_idle(_backstop)
@@ -974,10 +881,8 @@ class App:
             self._rubber = None
             self.after_canvas.draw_idle()
         if getattr(self.after_toolbar, "mode", ""):
-            self._draglog.log("finish_SKIP", why="toolbar_mode")
             return
         if start is None:
-            self._draglog.log("finish_SKIP", why="no_start")
             return
         if rel_x is not None:
             x1, y1 = rel_x, rel_y
@@ -986,24 +891,18 @@ class App:
             x1, y1 = last
             src = "drag_last"
         else:
-            self._draglog.log("finish_SKIP", why="no_endpoint")
             return
         x0, y0 = start
         # Treat tiny drags as a click (single pick / single unpick). A click
         # needs real on-axis release coords to hit-test the point.
         if abs(x1 - x0) < self._pick_tolerance(4) and \
                 abs(y1 - y0) < self._pick_tolerance(4):
-            self._draglog.log("finish_CLICK", endpoint_src=src,
-                              has_click_event=(click_event is not None))
             if click_event is not None:
                 self._on_segment_click(click_event, deselect=deselect)
             return
         # Window gesture: everything fully inside the rectangle.
-        self._draglog.log("finish_WINDOW", endpoint_src=src, deselect=deselect,
-                          x0=x0, y0=y0, x1=x1, y1=y1)
         self._window_select(min(x0, x1), min(y0, y1),
                             max(x0, x1), max(y0, y1), deselect=deselect)
-        self._draglog.log("window_done", selected=len(self._sel_entities))
 
     def _window_select(self, xmin, ymin, xmax, ymax, deselect=False):
         """Select (or, with ``deselect``, remove) every cleaned entity whose
@@ -1430,14 +1329,8 @@ class App:
 
 def main():
     root = TkinterDnD.Tk() if _HAS_DND else tk.Tk()
-    app = App(root)
-    try:
-        root.mainloop()
-    finally:
-        try:
-            app._draglog.flush()
-        except Exception:
-            pass
+    App(root)
+    root.mainloop()
 
 
 if __name__ == "__main__":
