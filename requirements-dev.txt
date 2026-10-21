@@ -1,0 +1,14 @@
+# Development / CI dependencies (not needed to RUN the cleaned-DXF tool,
+# only to test it and build the double-clickable .exe).
+#
+#   python -m pip install -r requirements.txt -r requirements-dev.txt
+#
+# Runtime deps live in requirements.txt and are intentionally not duplicated
+# here; install both files together.
+
+# Test runner. The suite is plain assert-based test_* functions that pytest
+# discovers; each file also runs standalone via its __main__ block.
+pytest==8.3.4
+
+# Packaging: builds dist/DXFCleanup.exe from DXFCleanup.spec (see build.ps1).
+pyinstaller==6.22.3
