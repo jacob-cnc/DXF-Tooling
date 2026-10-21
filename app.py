@@ -583,7 +583,10 @@ class App:
     def _on_after_press_tk(self, event):
         """Authoritative drag opener. Tk gives correct pixel coords on the very
         first press, unlike matplotlib. Converts to data coords and opens the
-        drag so a window gesture reliably starts regardless of drag direction."""
+        drag. A window-select may legitimately START in the axis margin and be
+        dragged across the drawing (as in every CAD tool), so the press is NOT
+        required to be inside the plot area -- any convertible canvas point
+        opens the drag."""
         wx, wy = getattr(event, "x", None), getattr(event, "y", None)
         ctrl = bool(getattr(event, "state", 0) & 0x0004)   # Tk Control mask
         self._draglog.log("tk_press", wx=wx, wy=wy, ctrl=ctrl)
@@ -592,14 +595,14 @@ class App:
         if self._drag_start is not None:
             return   # already open
         x, y, in_axes = self._tk_to_data(wx, wy)
-        if x is None or not in_axes:
-            self._draglog.log("tk_press_SKIP", why="not_in_axis",
-                              x=x, y=y, in_axes=in_axes)
+        if x is None:
+            self._draglog.log("tk_press_SKIP", why="no_convert")
             return
         self._drag_start = (x, y)
         self._drag_last = (x, y)
         self._drag_deselect = ctrl
-        self._draglog.log("drag_open", via="tk", deselect=ctrl, x=x, y=y)
+        self._draglog.log("drag_open", via="tk", deselect=ctrl,
+                          x=x, y=y, in_axes=in_axes)
 
     def _on_after_motion(self, event):
         if self._drag_start is None or event.inaxes is not self.after_ax \

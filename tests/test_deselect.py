@@ -250,6 +250,16 @@ def test_tk_press_opens_drag_from_pixel_coords():
         a._on_after_press_tk(press)
         assert a._drag_start is not None, \
             "Tk press failed to open the drag from pixel coords"
+        a._finish_drag(None, None, click_event=None)   # reset for next check
+
+        # Repro of the reported failure: press in the MARGIN above the drawing
+        # (tiny Tk y). A window-select legitimately starts outside the plot
+        # area and drags across it, so this must ALSO open the drag.
+        margin_press = SimpleNamespace(x=int(round(data_to_tk(cx_, cy_).x)),
+                                       y=2, state=0)
+        a._on_after_press_tk(margin_press)
+        assert a._drag_start is not None, \
+            "Tk press in the axis margin failed to open a window-select"
         # Drag outward + release through the mpl handlers (which resolve coords).
         xmin, ymin = min(lxs) - 1, min(lys) - 1
         xmax, ymax = max(lxs) + 1, max(lys) + 1
