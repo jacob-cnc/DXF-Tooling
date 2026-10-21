@@ -43,6 +43,7 @@ except Exception:
 # Selection highlight colors.
 _SELECT_COLOR = "#228B22"   # forest green -- highlighted geometry
 _DOT_COLOR = "#1E6FE0"      # complementary blue -- coordinate marker dots
+_DESELECT_COLOR = "#C0392B" # red -- Ctrl-drag deselect rubber-band
 
 
 def _close(a, b, tol=1e-4):
@@ -105,11 +106,16 @@ class App:
         self._segments = []         # cleaned LINE segments ((x0,y0),(x1,y1))
         self._arcs = []             # cleaned arcs (cx,cy,r,start_deg,end_deg)
         self._circles = []          # cleaned circles (cx,cy,r)
-        self._geom_highlights = []  # green overlay artists for selected geometry
+        self._geom_highlights = {}  # key -> green overlay artist (selected geom)
         # Selected cleaned entities for Join: handle -> ("line"|"arc", params).
         self._sel_entities = {}
+        # Row iid -> set of selected-entity keys that reference it. A row's dot
+        # is removed only when the LAST owning entity is deselected, so a point
+        # shared between two selected segments survives deselecting one.
+        self._row_owners = {}
         self._rubber = None         # rubber-band rectangle artist
         self._drag_start = None     # window-select drag anchor (data coords)
+        self._drag_deselect = False # True while a Ctrl-drag is in progress
 
         self._build_ui()
 
@@ -444,12 +450,21 @@ class App:
 
     # ---------------------------------------------------- interactive points
     # ---------------------------------------------------- after-view input
+    @staticmethod
+    def _is_ctrl(event):
+        """True if Ctrl was held for this matplotlib mouse event. matplotlib
+        reports the modifier in ``event.key`` (e.g. 'control', 'ctrl+shift')."""
+        k = getattr(event, "key", None) or ""
+        return "control" in k or "ctrl" in k
+
     def _on_after_press(self, event):
         if getattr(self.after_toolbar, "mode", ""):
             return
         if event.inaxes is not self.after_ax or event.xdata is None:
             return
         self._drag_start = (event.xdata, event.ydata)
+        # Latch the mode for the whole gesture: Ctrl = deselect, else select.
+        self._drag_deselect = self._is_ctrl(event)
 
     def _on_after_motion(self, event):
         if self._drag_start is None or event.inaxes is not self.after_ax \
@@ -463,16 +478,19 @@ class App:
             except Exception:
                 pass
         from matplotlib.patches import Rectangle
+        edge = _DESELECT_COLOR if self._drag_deselect else _SELECT_COLOR
         self._rubber = Rectangle((min(x0, x1), min(y0, y1)),
                                  abs(x1 - x0), abs(y1 - y0),
-                                 fill=False, edgecolor=_SELECT_COLOR,
+                                 fill=False, edgecolor=edge,
                                  linestyle="--", lw=1.0, zorder=12)
         self.after_ax.add_patch(self._rubber)
         self.after_canvas.draw_idle()
 
     def _on_after_release(self, event):
         start = self._drag_start
+        deselect = self._drag_deselect
         self._drag_start = None
+        self._drag_deselect = False
         if self._rubber is not None:
             try:
                 self._rubber.remove()
@@ -487,19 +505,22 @@ class App:
             return
         x0, y0 = start
         x1, y1 = event.xdata, event.ydata
-        # Treat tiny drags as a click (single pick).
+        # Treat tiny drags as a click (single pick / single unpick).
         if abs(x1 - x0) < self._pick_tolerance(4) and \
                 abs(y1 - y0) < self._pick_tolerance(4):
-            self._on_segment_click(event)
+            self._on_segment_click(event, deselect=deselect)
             return
-        # Window select: everything fully inside the rectangle.
-        self._window_select(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+        # Window gesture: everything fully inside the rectangle.
+        self._window_select(min(x0, x1), min(y0, y1),
+                            max(x0, x1), max(y0, y1), deselect=deselect)
 
-    def _window_select(self, xmin, ymin, xmax, ymax):
-        """Select every cleaned entity whose VISIBLE extent lies inside the
-        box. Arcs are tested by their actual swept portion, not their full
-        bounding circle (a fitted arc is a sliver of a huge circle, so the
-        bounding-circle test wrongly rejected them)."""
+    def _window_select(self, xmin, ymin, xmax, ymax, deselect=False):
+        """Select (or, with ``deselect``, remove) every cleaned entity whose
+        VISIBLE extent lies inside the box. Arcs are tested by their actual
+        swept portion, not their full bounding circle (a fitted arc is a sliver
+        of a huge circle, so the bounding-circle test wrongly rejected them)."""
+        act = self._deselect_geom if deselect else self._select_geom
+
         def inside(p):
             return xmin <= p[0] <= xmax and ymin <= p[1] <= ymax
 
@@ -513,7 +534,7 @@ class App:
 
         for (p0, p1) in self._segments:
             if inside(p0) and inside(p1):
-                self._select_geom(("line", p0, p1), [p0, p1])
+                act(("line", p0, p1), [p0, p1])
         for (cx, cy, r, sa, ea) in self._arcs:
             # Arc is selected only if its whole visible sweep is in the box.
             if all(inside(p) for p in sweep_points(cx, cy, r, sa, ea)):
@@ -521,7 +542,7 @@ class App:
                       cy + r * math.sin(math.radians(sa)))
                 e1 = (cx + r * math.cos(math.radians(ea)),
                       cy + r * math.sin(math.radians(ea)))
-                self._select_geom(("arc", cx, cy, r, sa, ea), [e0, e1])
+                act(("arc", cx, cy, r, sa, ea), [e0, e1])
         for (ox, oy, r) in self._circles:
             # A full circle: its bounding box must fit (it has no partial sweep).
             if (xmin <= ox - r and ox + r <= xmax
@@ -531,21 +552,63 @@ class App:
                     rad = math.radians(ang)
                     quads.append((ox + r * math.cos(rad),
                                   oy + r * math.sin(rad)))
-                self._select_geom(("circle", ox, oy, r), quads)
+                act(("circle", ox, oy, r), quads)
+
+    @staticmethod
+    def _geom_key(geom):
+        """Stable signature for a geom tuple (matches _add_selected_entity)."""
+        return repr(tuple(round(v, 6) if isinstance(v, float) else v
+                          for v in geom))
 
     def _select_geom(self, geom, targets):
         """Highlight a geom, record it for Join, and mark its point rows."""
         self._highlight_geometry(geom)
         self._add_selected_entity(geom)
+        key = self._geom_key(geom)
         for xy in targets:
             iid = self._nearest_point_iid(xy)
-            if iid is not None and iid not in self._markers:
+            if iid is None:
+                continue
+            self._row_owners.setdefault(iid, set()).add(key)
+            if iid not in self._markers:
                 self._mark_point(iid)
 
-    def _on_segment_click(self, event):
+    def _deselect_geom(self, geom, targets):
+        """Inverse of _select_geom: drop the green overlay, forget the entity
+        for Join, and remove each point dot that no OTHER selected entity still
+        owns (so a shared endpoint survives deselecting just one segment)."""
+        key = self._geom_key(geom)
+        if key not in self._sel_entities:
+            return   # wasn't selected; nothing to do
+        # Remove the green overlay for this specific geom.
+        art = self._geom_highlights.pop(key, None)
+        if art is not None:
+            try:
+                art.remove()
+            except Exception:
+                pass
+        self._sel_entities.pop(key, None)
+        # Release this entity's claim on each of its point rows.
+        for xy in targets:
+            iid = self._nearest_point_iid(xy)
+            if iid is None:
+                continue
+            owners = self._row_owners.get(iid)
+            if owners is not None:
+                owners.discard(key)
+                if not owners:
+                    self._row_owners.pop(iid, None)
+                    self._unmark_point(iid)
+        if self.join_btn is not None and len(self._sel_entities) < 2:
+            self.join_btn.configure(state="disabled")
+        self.after_canvas.draw_idle()
+        self._update_sel_count()
+
+    def _on_segment_click(self, event, deselect=False):
         """Click a LINE / ARC / CIRCLE in the After view -> mark the related
-        point-chart rows (highlight + red dots), reusing the multi-marker
-        model. Ignored while the toolbar is panning/zooming.
+        point-chart rows (highlight + dots), reusing the multi-marker model.
+        With ``deselect`` (Ctrl-click) the nearest selected entity is removed
+        instead. Ignored while the toolbar is panning/zooming.
 
         Row mapping:
           * LINE   -> its two endpoints,
@@ -599,29 +662,26 @@ class App:
         if best_targets is None or best_d > tol:
             return   # click wasn't near any geometry
 
-        # Forest-green highlight of the clicked geometry itself.
-        self._highlight_geometry(best_geom)
-        # Record the selected entity for a possible Join.
-        self._add_selected_entity(best_geom)
-        # Blue dots + row highlights for the related coordinate points.
-        for xy in best_targets:
-            iid = self._nearest_point_iid(xy)
-            if iid is not None and iid not in self._markers:
-                self._mark_point(iid)
+        if deselect:
+            self._deselect_geom(best_geom, best_targets)
+        else:
+            self._select_geom(best_geom, best_targets)
 
     def _add_selected_entity(self, geom):
         """Record a clicked cleaned entity for Join, keyed by a signature."""
         if not geom:
             return
-        key = repr(tuple(round(v, 6) if isinstance(v, float) else v
-                         for v in geom))
-        self._sel_entities[key] = geom
+        self._sel_entities[self._geom_key(geom)] = geom
         if self.join_btn is not None and len(self._sel_entities) >= 2:
             self.join_btn.configure(state="normal")
 
     def _highlight_geometry(self, geom):
-        """Draw a forest-green overlay on top of the selected entity."""
+        """Draw a forest-green overlay on top of the selected entity. A geom
+        already highlighted is left alone (no duplicate overlay stacking)."""
         if not geom:
+            return
+        key = self._geom_key(geom)
+        if key in self._geom_highlights:
             return
         kind = geom[0]
         artist = None
@@ -642,7 +702,7 @@ class App:
                                edgecolor=_SELECT_COLOR, lw=3.0, zorder=9)
             self.after_ax.add_patch(artist)
         if artist is not None:
-            self._geom_highlights.append(artist)
+            self._geom_highlights[key] = artist
             self.after_canvas.draw_idle()
 
     def _pick_tolerance(self, pixels):
@@ -736,13 +796,14 @@ class App:
             self.pts_tree.selection_remove(*self.pts_tree.selection())
         except Exception:
             pass
-        for art in self._geom_highlights:
+        for art in self._geom_highlights.values():
             try:
                 art.remove()
             except Exception:
                 pass
-        self._geom_highlights = []
+        self._geom_highlights = {}
         self._sel_entities = {}
+        self._row_owners = {}
         if getattr(self, "join_btn", None) is not None:
             self.join_btn.configure(state="disabled")
         self.after_canvas.draw_idle()
@@ -785,7 +846,8 @@ class App:
             # ax.clear() wiped any overlay artists; drop their stale refs.
             # Geometry caches are repopulated by _populate_points after render.
             self._markers = {}
-            self._geom_highlights = []
+            self._geom_highlights = {}
+            self._row_owners = {}
         ax.set_aspect("equal")
         ax.set_axis_off()
         try:
