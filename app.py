@@ -106,6 +106,17 @@ def _dist2(a, b):
     return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
 
 
+def _remove_artists(art):
+    """Remove a matplotlib artist, or every artist in a list (poly overlay)."""
+    if art is None:
+        return
+    for a in (art if isinstance(art, list) else [art]):
+        try:
+            a.remove()
+        except Exception:
+            pass
+
+
 def _point_seg_distance(px, py, a, b):
     """Shortest distance from point (px,py) to segment a-b."""
     ax, ay = a
@@ -176,6 +187,7 @@ class App:
         # its endpoints, and the interior parent-seam points (latent vertices
         # shown as translucent outlined dots and usable as Split locations).
         self._join_parents = []
+        self._polylines = []         # joined children as single selectable units
         self._seam_points = []       # interior parent-seam coords (latent dots)
         self._poly_endpoints = []    # joined-chain endpoint coords
         self._seam_dot_artists = []  # latent-dot artists (cleared on redraw)
@@ -434,7 +446,17 @@ class App:
         if self._cleaned_doc is None or len(self._sel_entities) < 2:
             return
         from dxfclean import longest_chain
-        geoms = list(self._sel_entities.values())
+        all_geoms = list(self._sel_entities.values())
+        # A selected joined child (("poly", i)) is already one polyline -- it
+        # cannot be a parent in a new join. Drop those so re-selecting a child
+        # and hitting Join is a no-op, not a double-join overlay.
+        geoms = [g for g in all_geoms if g and g[0] != "poly"]
+        if len(geoms) < 2:
+            messagebox.showinfo(
+                "Join", "Select at least two un-joined segments to join. "
+                "A segment that is already part of a joined chain can't be "
+                "joined again.")
+            return
         chain, used_geoms, leftover, reason = longest_chain(geoms)
         if chain is None:
             messagebox.showwarning(
@@ -543,9 +565,12 @@ class App:
         self._segments = []
         self._arcs = []
         self._circles = []
-        # Joined-polyline provenance for this render: interior seam points get
-        # the latent (translucent + outline) dot; the two endpoints get the
-        # normal solid dot. Rebuilt from the live doc each refresh.
+        # A joined child is ONE selectable unit: clicking anywhere on it selects
+        # the whole polyline, never a parent segment inside it. Its sub-geometry
+        # lives in _polylines (for hit-testing + highlight), NOT in the per-
+        # segment caches above. Interior seam vertices get the latent dot; the
+        # two chain endpoints get the solid dot.
+        self._polylines = []         # [{"subs":[("line"|"arc",...)], "verts":[...]}]
         self._seam_points = []       # [(x, y), ...] interior parent seams
         self._poly_endpoints = []    # [(x, y), ...] joined-chain endpoints
         try:
@@ -564,24 +589,24 @@ class App:
                     self._circles.append(
                         (e.dxf.center.x, e.dxf.center.y, e.dxf.radius))
                 elif t in ("LWPOLYLINE", "POLYLINE"):
-                    # A joined child. Expand it into its real sub-segments so
-                    # each PARENT segment is individually selectable again, and
-                    # split its vertices into endpoints vs interior seams.
+                    # A joined child. Collect its sub-geometry as ONE unit (not
+                    # into the per-segment caches) and its vertex sequence.
+                    subs = []
                     verts = []
+                    import math as _m
                     try:
                         for sub in e.virtual_entities():
                             st = sub.dxftype()
                             if st == "LINE":
                                 p0 = (sub.dxf.start.x, sub.dxf.start.y)
                                 p1 = (sub.dxf.end.x, sub.dxf.end.y)
-                                self._segments.append((p0, p1))
+                                subs.append(("line", p0, p1))
                                 verts.append(p0); verts.append(p1)
                             elif st == "ARC":
-                                self._arcs.append(
-                                    (sub.dxf.center.x, sub.dxf.center.y,
-                                     sub.dxf.radius, sub.dxf.start_angle,
-                                     sub.dxf.end_angle))
-                                import math as _m
+                                subs.append(("arc", sub.dxf.center.x,
+                                             sub.dxf.center.y, sub.dxf.radius,
+                                             sub.dxf.start_angle,
+                                             sub.dxf.end_angle))
                                 for ang in (sub.dxf.start_angle,
                                             sub.dxf.end_angle):
                                     r = _m.radians(ang)
@@ -591,19 +616,20 @@ class App:
                                          sub.dxf.center.y
                                          + sub.dxf.radius * _m.sin(r)))
                     except Exception:
-                        verts = []
-                    # De-duplicate consecutive coincident vertices, preserving
-                    # order, to recover the chain's vertex sequence.
+                        subs, verts = [], []
                     chain_v = []
                     for v in verts:
                         if not chain_v or _dist2(chain_v[-1], v) > 1e-10:
                             chain_v.append(v)
-                    if len(chain_v) >= 2:
+                    if len(chain_v) >= 2 and subs:
+                        self._polylines.append({"subs": subs,
+                                                "verts": chain_v})
                         self._poly_endpoints.append(chain_v[0])
                         self._poly_endpoints.append(chain_v[-1])
                         self._seam_points.extend(chain_v[1:-1])
         except Exception:
             self._segments, self._arcs, self._circles = [], [], []
+            self._polylines = []
 
         for p in points:
             self.pts_tree.insert("", "end", iid=str(p.index),
@@ -851,6 +877,12 @@ class App:
                     quads.append((ox + r * math.cos(rad),
                                   oy + r * math.sin(rad)))
                 act(("circle", ox, oy, r), quads)
+        # Joined children: select the WHOLE polyline when every vertex is in
+        # the box (it is one unit, never its parent segments).
+        for i, poly in enumerate(self._polylines):
+            verts = poly["verts"]
+            if verts and all(inside(v) for v in verts):
+                act(("poly", i), [verts[0], verts[-1]])
 
     @staticmethod
     def _geom_key(geom):
@@ -880,11 +912,7 @@ class App:
             return   # wasn't selected; nothing to do
         # Remove the green overlay for this specific geom.
         art = self._geom_highlights.pop(key, None)
-        if art is not None:
-            try:
-                art.remove()
-            except Exception:
-                pass
+        _remove_artists(art)
         self._sel_entities.pop(key, None)
         # Release this entity's claim on each of its point rows.
         for xy in targets:
@@ -957,6 +985,16 @@ class App:
                 best_d, best_targets = d, quads
                 best_geom = ("circle", ox, oy, r)
 
+        # Joined children: a polyline is ONE unit. Distance is to its nearest
+        # sub-segment; a hit selects the WHOLE polyline (targets = its two
+        # endpoints only -- interior seams are not segment-selectable).
+        for i, poly in enumerate(self._polylines):
+            d = self._poly_distance(cx, cy, poly)
+            if d is not None and (best_d is None or d < best_d):
+                verts = poly["verts"]
+                best_d, best_targets = d, [verts[0], verts[-1]]
+                best_geom = ("poly", i)
+
         if best_targets is None or best_d > tol:
             return   # click wasn't near any geometry
 
@@ -964,6 +1002,19 @@ class App:
             self._deselect_geom(best_geom, best_targets)
         else:
             self._select_geom(best_geom, best_targets)
+
+    def _poly_distance(self, px, py, poly):
+        """Shortest distance from (px,py) to a joined polyline's sub-geometry."""
+        best = None
+        for sub in poly["subs"]:
+            if sub[0] == "line":
+                d = _point_seg_distance(px, py, sub[1], sub[2])
+            else:   # arc
+                _, ax0, ay0, r, sa, ea = sub
+                d = _point_arc_distance(px, py, ax0, ay0, r, sa, ea)
+            if best is None or d < best:
+                best = d
+        return best
 
     def _add_selected_entity(self, geom):
         """Record a clicked cleaned entity for Join, keyed by a signature."""
@@ -983,6 +1034,31 @@ class App:
             return
         kind = geom[0]
         artist = None
+        if kind == "poly":
+            # Highlight the WHOLE joined child: draw each sub-segment green and
+            # store them as a group under this key.
+            i = geom[1]
+            if i >= len(self._polylines):
+                return
+            arts = []
+            for sub in self._polylines[i]["subs"]:
+                if sub[0] == "line":
+                    _, p0, p1 = sub
+                    (a0,) = self.after_ax.plot(
+                        [p0[0], p1[0]], [p0[1], p1[1]], color=_SELECT_COLOR,
+                        lw=3.0, solid_capstyle="round", zorder=9)
+                    arts.append(a0)
+                else:
+                    _, ax0, ay0, r, sa, ea = sub
+                    a0 = MplArc((ax0, ay0), r * 2, r * 2, angle=0,
+                                theta1=sa, theta2=ea, edgecolor=_SELECT_COLOR,
+                                lw=3.0, zorder=9)
+                    self.after_ax.add_patch(a0)
+                    arts.append(a0)
+            if arts:
+                self._geom_highlights[key] = arts   # a LIST for a poly
+                self.after_canvas.draw_idle()
+            return
         if kind == "line":
             _, p0, p1 = geom
             (artist,) = self.after_ax.plot(
@@ -1095,10 +1171,7 @@ class App:
         except Exception:
             pass
         for art in self._geom_highlights.values():
-            try:
-                art.remove()
-            except Exception:
-                pass
+            _remove_artists(art)
         self._geom_highlights = {}
         self._sel_entities = {}
         self._row_owners = {}

@@ -39,35 +39,76 @@ def _app():
     return a, root
 
 
-def test_join_keeps_parents_selectable_and_records_seams():
+def test_join_makes_one_unit_and_records_seams():
     a, root = _app()
     if a is None:
         import pytest; pytest.skip("no Tk display")
     try:
         if len(a._arcs) < 8:
             import pytest; pytest.skip("fixture produced too few arcs")
+        before_arcs = len(a._arcs)
         arcs8 = a._arcs[:8]
         for ar in arcs8:
             a._select_geom(("arc",) + tuple(ar), [])
         assert len(a._sel_entities) == 8
         a.join_selected()
         root.update()
-        # One joined child recorded.
+        # One joined child recorded, cached as a single selectable unit.
         assert len(a._join_parents) == 1
+        assert len(a._polylines) == 1, \
+            "joined child should be one polyline unit"
         # 8 arcs joined -> 7 interior seams + 2 endpoints.
         assert len(a._seam_points) == 7, \
             "expected 7 seam points, got %d" % len(a._seam_points)
         assert len(a._poly_endpoints) == 2
-        # The child's parent segments are back in the hit-test caches (so the
-        # curve is still selectable), not collapsed into an opaque polyline.
-        assert len(a._arcs) >= 8, \
-            "joined sub-arcs should remain selectable in the arc cache"
+        # The joined arcs LEFT the per-segment cache (they are no longer
+        # individually selectable; only the whole polyline is).
+        assert len(a._arcs) == before_arcs - 8, \
+            "joined sub-arcs must leave the per-arc cache (child is one unit)"
         # Latent seam dots were actually drawn as artists.
         assert len(a._seam_dot_artists) == len(a._seam_points)
     finally:
         root.destroy()
 
 
+def test_clicking_joined_child_selects_whole_polyline():
+    """Clicking anywhere on a joined child selects the WHOLE polyline as one
+    unit, not a parent segment inside it; re-joining it is a no-op."""
+    import math
+    from types import SimpleNamespace
+    a, root = _app()
+    if a is None:
+        import pytest; pytest.skip("no Tk display")
+    try:
+        if len(a._arcs) < 6:
+            import pytest; pytest.skip("fixture produced too few arcs")
+        for ar in a._arcs[:6]:
+            a._select_geom(("arc",) + tuple(ar), [])
+        a.join_selected(); root.update()
+        assert len(a._polylines) == 1
+        a.clear_all_points()
+        sub = a._polylines[0]["subs"][1]
+        if sub[0] == "arc":
+            _, cx, cy, r, sa, ea = sub
+            m = math.radians((sa + ea) / 2.0)
+            px, py = cx + r * math.cos(m), cy + r * math.sin(m)
+        else:
+            px = (sub[1][0] + sub[2][0]) / 2.0
+            py = (sub[1][1] + sub[2][1]) / 2.0
+        ev = SimpleNamespace(inaxes=a.after_ax, xdata=px, ydata=py, key=None)
+        a._on_segment_click(ev)
+        keys = list(a._sel_entities.keys())
+        assert len(keys) == 1 and "poly" in keys[0], \
+            "clicking a joined child should select the whole polyline unit"
+        # Re-joining a selection that is only a joined child must be a no-op.
+        n_before = len(a._polylines)
+        a.join_selected()
+        assert len(a._polylines) == n_before, "a child was re-joined (overlay)"
+    finally:
+        root.destroy()
+
+
 if __name__ == "__main__":
-    test_join_keeps_parents_selectable_and_records_seams()
+    test_join_makes_one_unit_and_records_seams()
+    test_clicking_joined_child_selects_whole_polyline()
     print("join seams: OK")
