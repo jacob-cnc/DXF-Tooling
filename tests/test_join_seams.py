@@ -58,15 +58,15 @@ def test_join_makes_one_unit_and_records_seams():
         assert len(a._polylines) == 1, \
             "joined child should be one polyline unit"
         # 8 arcs joined -> 7 interior seams + 2 endpoints.
-        assert len(a._seam_points) == 7, \
-            "expected 7 seam points, got %d" % len(a._seam_points)
+        assert len(a._seams) == 7, \
+            "expected 7 seam points, got %d" % len(a._seams)
         assert len(a._poly_endpoints) == 2
         # The joined arcs LEFT the per-segment cache (they are no longer
         # individually selectable; only the whole polyline is).
         assert len(a._arcs) == before_arcs - 8, \
             "joined sub-arcs must leave the per-arc cache (child is one unit)"
         # Latent seam dots were actually drawn as artists.
-        assert len(a._seam_dot_artists) == len(a._seam_points)
+        assert len(a._seam_dot_artists) == len(a._seams)
     finally:
         root.destroy()
 

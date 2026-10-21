@@ -25,6 +25,7 @@ if HERE not in sys.path:
 from dxfclean import (clean_file, clean_doc, draw_dxf, collect_points,  # noqa: E402
                       write_csv)
 from dxfclean import editgeom as _eg  # noqa: E402  pure hit-test/split geometry
+from dxfclean import Seam  # noqa: E402  one latent parent-seam dot record
 
 import matplotlib  # noqa: E402
 matplotlib.use("TkAgg")
@@ -109,8 +110,7 @@ class App:
         # shown as translucent outlined dots and usable as Split locations).
         self._join_parents = []
         self._polylines = []         # joined children as single selectable units
-        self._seam_points = []       # interior parent-seam coords (latent dots)
-        self._seam_owner = []        # parallel: (poly_index, vertex_index)
+        self._seams = []             # list[Seam]: latent parent-seam dots
         self._pending_split = None   # (poly_index, vertex_index) armed for Split
         self._poly_endpoints = []    # joined-chain endpoint coords
         self._seam_dot_artists = []  # latent-dot artists (cleared on redraw)
@@ -394,12 +394,13 @@ class App:
 
     # ----------------------------------------------------------- split
     def _arm_split(self, seam_k):
-        """Arm a split at seam index ``seam_k`` (into _seam_points/_seam_owner):
-        mark that dot as the pending cut point and enable the Split button."""
-        if seam_k >= len(self._seam_owner):
+        """Arm a split at seam index ``seam_k`` (into _seams): mark that dot as
+        the pending cut point and enable the Split button."""
+        if seam_k >= len(self._seams):
             return
-        self._pending_split = self._seam_owner[seam_k]   # (poly_i, vertex_i)
-        pt = self._seam_points[seam_k]
+        seam = self._seams[seam_k]
+        self._pending_split = seam.owner   # (poly_i, vertex_i)
+        pt = seam.point
         # Redraw dots, then overlay a solid marker on the armed seam so the
         # user sees exactly where the cut will happen.
         self._draw_seam_dots()
@@ -505,8 +506,7 @@ class App:
         # segment caches above. Interior seam vertices get the latent dot; the
         # two chain endpoints get the solid dot.
         self._polylines = []         # [{"subs":[("line"|"arc",...)], "verts":[...]}]
-        self._seam_points = []       # [(x, y), ...] interior parent seams
-        self._seam_owner = []        # parallel (poly_index, vertex_index)
+        self._seams = []             # list[Seam]: interior parent seams
         self._poly_endpoints = []    # [(x, y), ...] joined-chain endpoints
         self._pending_split = None   # a rebuild clears any armed split
         if getattr(self, "split_btn", None) is not None:
@@ -566,8 +566,7 @@ class App:
                         self._poly_endpoints.append(chain_v[0])
                         self._poly_endpoints.append(chain_v[-1])
                         for vi in range(1, len(chain_v) - 1):
-                            self._seam_points.append(chain_v[vi])
-                            self._seam_owner.append((pi, vi))
+                            self._seams.append(Seam(chain_v[vi], pi, vi))
         except Exception:
             self._segments, self._arcs, self._circles = [], [], []
             self._polylines = []
@@ -593,13 +592,14 @@ class App:
             except Exception:
                 pass
         self._seam_dot_artists = []
-        for (x, y) in self._seam_points:
+        for seam in self._seams:
+            x, y = seam.point
             (dot,) = self.after_ax.plot(
                 [x], [y], marker="o", markersize=8, linestyle="None",
                 markerfacecolor=_SEAM_FILL, markeredgecolor=_SEAM_EDGE,
                 markeredgewidth=1.4, alpha=0.45, zorder=10)
             self._seam_dot_artists.append(dot)
-        if self._seam_points:
+        if self._seams:
             self.after_canvas.draw_idle()
 
     # ---------------------------------------------------- interactive points
@@ -861,10 +861,11 @@ class App:
 
         # Seam dots first: clicking a translucent parent-seam dot ARMS a split
         # at that vertex (it does not select the child). Ctrl-click clears it.
-        if self._seam_points:
+        if self._seams:
             stol = self._pick_tolerance(10)
             sbest = None
-            for k, (sx, sy) in enumerate(self._seam_points):
+            for k, seam in enumerate(self._seams):
+                sx, sy = seam.point
                 d = math.hypot(cx - sx, cy - sy)
                 if sbest is None or d < sbest[0]:
                     sbest = (d, k)
