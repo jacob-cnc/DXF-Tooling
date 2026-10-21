@@ -1,9 +1,8 @@
 # DXF-Tooling
 
-Lightweight DXF cleanup for chaining geometry on a **ProtoTRAK DPM RMX** mill
-control. Takes a messy / CAD-exported DXF and produces a *machinable* DXF where:
+Lightweight DXF cleanup for CNC applications. Takes a messy / CAD-exported DXF and produces a *machinable* DXF where:
 
-1. Curves are real arcs/circles, not splines, and
+1. Curves are real arcs/circles, not faceted splines, and
 2. Every line is broken at each point another entity touches it, so no entity
    runs through another's intersection or overlaps a colinear line.
 
@@ -13,15 +12,13 @@ core splitting algorithm (`dxfclean/core.py`) is a direct port of the original
 
 ## What it does
 
-- **Splines → arcs (default) or lines.** With **Convert splines to arcs** on
+- **Splines → arcs or lines.** With **Convert splines to arcs** on
   (the default), `SPLINE` entities are fitted to a G1-continuous chain of true
   circular `ARC`s (plus lines where straight) via biarc interpolation
   (`dxfclean/arcfit.py`) within a chord tolerance (default 0.005 mm). Arcs map
-  directly to CNC `G2`/`G3` and give the ProtoTRAK chaining workflow far fewer
-  segments to click. With the toggle off, splines are instead flattened to
-  line segments with **curvature-adaptive sampling** (chord error ≈0.1% of the
-  curve's bounding box). Either way, no spline survives in the output; anything
-  that can't be fitted/sampled is flagged and dropped.
+  directly to CNC `G2`/`G3` and give the CNC chaining workflow far fewer
+  segments to click. Anything that can't be fitted/sampled is flagged and dropped.
+ 
 - **Breaks every line at each intersection / touch point** (other line
   endpoints and crossings, and `ARC` / `CIRCLE` intersections on the arc's
   active sweep).
@@ -39,7 +36,7 @@ core splitting algorithm (`dxfclean/core.py`) is a direct port of the original
 > which does not work. Always invoke the full path:
 >
 > ```
-> C:\Users\jhonick\AppData\Local\Python\pythoncore-3.15-64\python.exe
+> C:\Users\user_name\AppData\Local\Python\pythoncore-3.15-64\python.exe
 > ```
 
 Dependencies (pinned to the versions validated on the machine — see
@@ -61,7 +58,7 @@ Python and needs nothing extra.
 ## Run the app
 
 ```powershell
-& "C:\Users\jhonick\AppData\Local\Python\pythoncore-3.15-64\python.exe" app.py
+& "C:\Users\user_name\AppData\Local\Python\pythoncore-3.15-64\python.exe" app.py
 ```
 
 Pick (or drag) a DXF in. The workflow is three explicit steps:
@@ -80,7 +77,7 @@ Pick (or drag) a DXF in. The workflow is three explicit steps:
 ## Command line (headless / scripting)
 
 ```powershell
-& "C:\Users\jhonick\AppData\Local\Python\pythoncore-3.15-64\python.exe" -m dxfclean.cli "in.dxf" "out.dxf"
+& "C:\Users\user_name\AppData\Local\Python\pythoncore-3.15-64\python.exe" -m dxfclean.cli "in.dxf" "out.dxf"
 ```
 
 Omit the output path to write `<name>_clean.dxf` next to the input.
@@ -98,7 +95,7 @@ In the **GUI**, the table appears on the right after you click *Clean + Save*,
 with a **Save points CSV…** button. Headless:
 
 ```powershell
-& "C:\Users\jhonick\AppData\Local\Python\pythoncore-3.15-64\python.exe" -m dxfclean.cli points "in.dxf" "points.csv"
+& "C:\Users\username\AppData\Local\Python\pythoncore-3.15-64\python.exe" -m dxfclean.cli points "in.dxf" "points.csv"
 ```
 
 Prints the table; the optional second argument also writes it as CSV
