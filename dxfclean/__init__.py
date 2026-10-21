@@ -13,9 +13,17 @@ from .render import render, draw_dxf
 from .points import (collect_points, collect_points_from_report, Point,
                      points_as_table, points_as_csv, write_csv)
 from .joinseg import order_chain, longest_chain
+from .editgeom import (close, dist2, point_seg_distance, point_arc_distance,
+                       angle_in_sweep, sub_distance, poly_distance,
+                       sub_endpoints_bulge, subs_to_lwpoly_points,
+                       split_chain_subs, chain_vertices)
 
 __all__ = ["clean_doc", "clean_file", "CleanReport", "TOL", "render", "draw_dxf",
            "merge_overlapping_lines", "order_chain", "longest_chain",
            "collect_points", "collect_points_from_report", "Point",
-           "points_as_table", "points_as_csv", "write_csv"]
+           "points_as_table", "points_as_csv", "write_csv",
+           "close", "dist2", "point_seg_distance", "point_arc_distance",
+           "angle_in_sweep", "sub_distance", "poly_distance",
+           "sub_endpoints_bulge", "subs_to_lwpoly_points", "split_chain_subs",
+           "chain_vertices"]
 __version__ = "0.1.0"
