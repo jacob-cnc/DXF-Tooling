@@ -27,6 +27,7 @@ sys.path.insert(0, REPO)
 import ezdxf  # noqa: E402
 
 from dxfclean import clean_file, render  # noqa: E402
+from dxfclean.core import circle_circle_points  # noqa: E402
 
 FIXTURE = os.path.join(REPO, "fixtures", "delrin_peg_ARCS_unsplit.dxf")
 DOCS = os.path.join(REPO, "docs")
@@ -240,7 +241,36 @@ def run():
         assert abs(in_sweep[key] - out_sweep[key]) < 1e-3, \
             "total swept angle changed for arc %r (%.4f -> %.4f)" % (
                 key, in_sweep[key], out_sweep[key])
-    assert len(out_circles) == len(in_circles), "circles must be unchanged"
+    # Circles are now subdivided into arc pieces at points where other
+    # geometry crosses their ring (so each piece is independently
+    # selectable/chainable); a circle with NO intersections on its ring is
+    # left whole. So the invariant is not "circle count unchanged" but: every
+    # OUTPUT circle genuinely has no vertex on its ring (nothing crosses it),
+    # and no full-circle ring was dropped without being replaced by arc
+    # geometry. We assert the first, machine-meaningful half here.
+    def _circle_has_crossing(c, lines, arcs, circles):
+        cx, cy, r = c
+        for (a, b) in lines:
+            for t in line_circle_params(a, b, cx, cy, r):
+                if TOL < t < 1 - TOL:
+                    return True
+        for (ax, ay, ar, asa, aea) in arcs:
+            for (px, py) in circle_circle_points(cx, cy, r, ax, ay, ar):
+                oang = math.degrees(math.atan2(py - ay, px - ax))
+                if ang_in(oang, asa, aea):
+                    return True
+        for (ox, oy, orr) in circles:
+            if abs(ox - cx) < 1e-4 and abs(oy - cy) < 1e-4 \
+                    and abs(orr - r) < 1e-4:
+                continue
+            if circle_circle_points(cx, cy, r, ox, oy, orr):
+                return True
+        return False
+
+    for c in out_circles:
+        assert not _circle_has_crossing(c, out_lines, out_arcs, out_circles), \
+            "an output circle still has a vertex on its ring and should have " \
+            "been split into arcs: %r" % (c,)
 
     # 3) zero zero-length segments
     zeros = [i for i, (a, b) in enumerate(out_lines)
