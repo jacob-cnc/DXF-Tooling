@@ -1,8 +1,7 @@
 # Installing DXF Cleanup
 
-A simple Windows tool that cleans up a DXF drawing so it runs cleanly on the
-**ProtoTRAK DPM RMX** control: it removes splines and breaks every line at the
-points where other lines cross it, so the control can chain the geometry.
+A simple Windows tool that cleans up a DXF drawing to optimize it for CNC control: it removes faceted splines and breaks every line at the
+points where other lines cross it, so discrete lines and arcs can be easily selected.
 
 **There is nothing to install.** It is a single file. You do not need Python,
 admin rights, or an internet connection.
