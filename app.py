@@ -24,6 +24,7 @@ if HERE not in sys.path:
 
 from dxfclean import (clean_file, clean_doc, draw_dxf, collect_points,  # noqa: E402
                       write_csv)
+from dxfclean import editgeom as _eg  # noqa: E402  pure hit-test/split geometry
 
 import matplotlib  # noqa: E402
 matplotlib.use("TkAgg")
@@ -49,13 +50,13 @@ _SEAM_EDGE = "#0B3D91"      # latent parent-seam dot outline (darker blue)
 
 
 def _close(a, b, tol=1e-4):
-    """Point equality within tol."""
-    return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
+    """Point equality within tol (-> dxfclean.editgeom.close)."""
+    return _eg.close(a, b, tol)
 
 
 def _dist2(a, b):
-    """Squared distance between two (x, y) points."""
-    return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+    """Squared distance between two (x, y) points (-> editgeom.dist2)."""
+    return _eg.dist2(a, b)
 
 
 def _remove_artists(art):
@@ -69,43 +70,11 @@ def _remove_artists(art):
             pass
 
 
-def _point_seg_distance(px, py, a, b):
-    """Shortest distance from point (px,py) to segment a-b."""
-    ax, ay = a
-    bx, by = b
-    dx, dy = bx - ax, by - ay
-    L2 = dx * dx + dy * dy
-    if L2 == 0.0:
-        return math.hypot(px - ax, py - ay)
-    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
-    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
-
-
-def _angle_in_sweep(deg, start_deg, end_deg):
-    """True if angle ``deg`` lies on the CCW sweep start->end (DXF convention)."""
-    a = deg % 360.0
-    s = start_deg % 360.0
-    e = end_deg % 360.0
-    if s <= e:
-        return s - 1e-9 <= a <= e + 1e-9
-    return a >= s - 1e-9 or a <= e + 1e-9
-
-
-def _point_arc_distance(px, py, cx, cy, r, start_deg, end_deg):
-    """Distance from (px,py) to an arc. If the click's angle is within the
-    sweep, it's the radial distance |dist-to-centre - r|; otherwise it's the
-    distance to the nearer arc endpoint."""
-    d = math.hypot(px - cx, py - cy)
-    ang = math.degrees(math.atan2(py - cy, px - cx))
-    if _angle_in_sweep(ang, start_deg, end_deg):
-        return abs(d - r)
-    best = None
-    for a_deg in (start_deg, end_deg):
-        rad = math.radians(a_deg)
-        ex, ey = cx + r * math.cos(rad), cy + r * math.sin(rad)
-        dd = math.hypot(px - ex, py - ey)
-        best = dd if best is None else min(best, dd)
-    return best if best is not None else abs(d - r)
+# Pure hit-test geometry now lives in dxfclean.editgeom; keep the private
+# module names as thin aliases so existing call sites are untouched.
+_point_seg_distance = _eg.point_seg_distance
+_angle_in_sweep = _eg.angle_in_sweep
+_point_arc_distance = _eg.point_arc_distance
 
 
 class App:
@@ -516,11 +485,10 @@ class App:
             return
         poly = self._polylines[pi]
         subs, verts = poly["subs"], poly["verts"]
-        if vi <= 0 or vi >= len(verts) - 1:
+        left_subs, right_subs = _eg.split_chain_subs(subs, vi)
+        if left_subs is None:
             self._clear_pending_split()
             return
-        left_subs = subs[:vi]     # sub j spans verts[j]->verts[j+1]
-        right_subs = subs[vi:]
         msp = self._cleaned_doc.modelspace()
         layer = "0"
         # Delete the original polyline entity.
@@ -549,8 +517,8 @@ class App:
 
     def _emit_subs(self, msp, subs, layer):
         """Emit a list of sub-geoms as a single LWPOLYLINE (>=2 subs) or as a
-        plain LINE/ARC (exactly 1 sub -- no longer a chain)."""
-        import math as _m
+        plain LINE/ARC (exactly 1 sub -- no longer a chain). The vertex/bulge
+        math lives in dxfclean.editgeom; this only writes DXF entities."""
         if not subs:
             return
         attribs = {"layer": layer}
@@ -563,33 +531,8 @@ class App:
                 _, cx, cy, r, sa, ea = s
                 msp.add_arc((cx, cy), r, sa, ea, dxfattribs=attribs)
             return
-        # Rebuild the (x, y, bulge) vertex list for the sub-chain.
-        pts = []
-        for j, s in enumerate(subs):
-            if s[0] == "line":
-                _, p0, p1 = s
-                a, b = p0, p1
-                bulge = 0.0
-            else:
-                _, cx, cy, r, sa, ea = s
-                a = (cx + r * _m.cos(_m.radians(sa)),
-                     cy + r * _m.sin(_m.radians(sa)))
-                b = (cx + r * _m.cos(_m.radians(ea)),
-                     cy + r * _m.sin(_m.radians(ea)))
-                sweep = (ea - sa) % 360.0
-                bulge = _m.tan(_m.radians(sweep) / 4.0)
-            # Orient so the chain is continuous: first sub sets direction.
-            if pts and _dist2((pts[-1][0], pts[-1][1]), a) > 1e-10 \
-                    and _dist2((pts[-1][0], pts[-1][1]), b) <= 1e-10:
-                a, b = b, a
-                bulge = -bulge
-            if not pts:
-                pts.append([a[0], a[1], 0.0, 0.0, bulge])
-            else:
-                pts[-1][4] = bulge
-            pts.append([b[0], b[1], 0.0, 0.0, 0.0])
-        msp.add_lwpolyline([tuple(p) for p in pts], format="xyseb",
-                           dxfattribs=attribs)
+        pts = _eg.subs_to_lwpoly_points(subs)
+        msp.add_lwpolyline(pts, format="xyseb", dxfattribs=attribs)
 
     def _entity_matches_any(self, e, geoms) -> bool:
         """True if a live cleaned entity corresponds to one of ``geoms``."""
@@ -1087,16 +1030,7 @@ class App:
 
     def _poly_distance(self, px, py, poly):
         """Shortest distance from (px,py) to a joined polyline's sub-geometry."""
-        best = None
-        for sub in poly["subs"]:
-            if sub[0] == "line":
-                d = _point_seg_distance(px, py, sub[1], sub[2])
-            else:   # arc
-                _, ax0, ay0, r, sa, ea = sub
-                d = _point_arc_distance(px, py, ax0, ay0, r, sa, ea)
-            if best is None or d < best:
-                best = d
-        return best
+        return _eg.poly_distance(px, py, poly["subs"])
 
     def _add_selected_entity(self, geom):
         """Record a clicked cleaned entity for Join, keyed by a signature."""
