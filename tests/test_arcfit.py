@@ -99,6 +99,61 @@ def test_line_mode_still_default_off():
     assert len(arcs) == 0, "default mode should not emit spline arcs"
 
 
+def _closed_splines():
+    """Closed SPLINE loops whose start point equals their end point: a round
+    loop and a long flat slot (the 2.17 x 0.03 shape from the Brian Flipper
+    Base file that used to collapse to a zero-length line)."""
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    round_pts = [(math.cos(a) * 5, math.sin(a) * 3)
+                 for a in [k * math.pi / 4 for k in range(8)]]
+    slot_pts = [(0, 0), (0.7, -0.015), (1.4, -0.015), (2.1, 0),
+                (1.4, 0.015), (0.7, 0.015)]
+    # Clamped splines whose first and last control points coincide start and
+    # end on the same point, like the closed loops in that file.
+    msp.add_open_spline(round_pts + round_pts[:1], degree=3)
+    msp.add_open_spline(slot_pts + slot_pts[:1], degree=3)
+    return doc, list(msp.query("SPLINE"))
+
+
+def test_closed_spline_fits_as_closed_loop():
+    """A closed spline is fitted as a connected loop within tolerance, with
+    no zero-length pieces (they crashed the splitter with ZeroDivisionError)."""
+    tol = 0.005
+    _doc, splines = _closed_splines()
+    for i, sp in enumerate(splines):
+        ct = sp.construction_tool()
+        p0, p1 = ct.point(0), ct.point(float(ct.max_t))
+        assert math.dist(p0, p1) < 1e-9, "fixture spline %d not closed" % i
+        pieces = arcfit.fit_spline(sp, tol)
+        assert pieces and len(pieces) >= 2, \
+            "closed spline %d collapsed to %d piece(s)" % (i, len(pieces or []))
+        for pc in pieces:
+            assert math.dist(pc.start, pc.end) > 1e-9, \
+                "closed spline %d produced a zero-length piece" % i
+        for a, b in zip(pieces, pieces[1:] + pieces[:1]):
+            assert math.dist(a.end, b.start) < 1e-6, \
+                "closed spline %d chain has a gap" % i
+        dev = _max_deviation(sp, pieces)
+        assert dev <= tol * 1.05, \
+            "closed spline %d deviation %.5f exceeds tol" % (i, dev)
+
+
+def test_closed_spline_cleans_end_to_end():
+    """clean_doc(spline_to_arcs=True) handles closed splines without error."""
+    doc, _ = _closed_splines()
+    ndoc, report = clean_doc(doc, spline_to_arcs=True, arc_tol=0.005)
+    assert report.splines_converted == 2
+    assert len(list(ndoc.modelspace())) > 2
+
+
+def test_line_circle_params_zero_length_segment():
+    """A zero-length segment has no circle crossings (and must not divide by
+    zero)."""
+    from dxfclean.core import line_circle_params
+    assert line_circle_params((1.0, 2.0), (1.0, 2.0), 0.0, 0.0, 3.0) == []
+
+
 def run():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
