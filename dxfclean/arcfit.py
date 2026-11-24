@@ -31,6 +31,10 @@ from typing import List, Optional, Tuple
 
 Vec = Tuple[float, float]
 
+# A span whose endpoints are closer than this (drawing units) is treated as
+# closed: it has no usable chord and must be subdivided before fitting.
+_CLOSED_EPS = 1e-9
+
 
 @dataclass
 class ArcSeg:
@@ -241,6 +245,17 @@ def fit_curve(eval_point, eval_tangent, u0, u1, tol,
     def recurse(ua, ub, depth):
         pts = sample(ua, ub, samples)
         a0, a1 = pts[0], pts[-1]
+        # Closed span (start == end, e.g. a closed SPLINE loop): there is no
+        # chord, so a line, arc or biarc would collapse the whole loop to a
+        # zero-length piece. Split it in half instead. A span whose samples
+        # all sit on one point is degenerate and emits nothing.
+        if _norm(_sub(a1, a0)) < _CLOSED_EPS:
+            if all(_norm(_sub(p, a0)) < _CLOSED_EPS for p in pts):
+                return []
+            if depth < max_depth:
+                um = 0.5 * (ua + ub)
+                return recurse(ua, um, depth + 1) + recurse(um, ub, depth + 1)
+            return []
         # straight?
         if _is_straight(pts, tol):
             return [LineSeg(a0, a1)]

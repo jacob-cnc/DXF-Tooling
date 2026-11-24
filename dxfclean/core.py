@@ -58,6 +58,8 @@ def line_circle_params(a, b, cx, cy, r):
     (ax, ay), (bx, by) = a, b
     dx, dy = bx - ax, by - ay
     A = dx * dx + dy * dy
+    if A == 0:
+        return []       # zero-length segment: no crossings (and no divide)
     fx, fy = ax - cx, ay - cy
     B = 2 * (fx * dx + fy * dy)
     C = fx * fx + fy * fy - r * r
